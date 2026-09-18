@@ -233,7 +233,7 @@ struct Veh {
 // A native record that passes untouched is a promise too (its own ETA), so pass-through is recorded.
 struct Sent { uint32_t srcT = 0, eta = 0, at = 0; };   // sample tick, promised ETA, send tick
 constexpr double   kSrcEmaAlpha  = 0.2;   // smoothing of I_src (≈ last 5 samples)
-constexpr uint32_t kRefreshMargin = 3;    // re-send this many ticks before the last promise expires
+constexpr uint32_t kRefreshMargin = 3;    // promises last I + this, re-sent every I: jitter never expires one
 
 // state (protected by the caller's send lock)
 inline std::unordered_map<uint32_t, Veh>                 g_veh;      // vehId -> freshest sample
@@ -372,7 +372,7 @@ inline void fill_pose(uint8_t* r, int avail, const Veh& v, uint32_t targetTick) 
 }
 
 // The promise we make recipient B for V at send tick `tick`: ETA and the pose's target tick.
-//   ETA    = tick + I_src   (we will have a fresh sample — or re-send — by then)
+//   ETA    = tick + I + margin   (we re-send every I ticks, fresh sample or dead-reckoned)
 //   target = ETA − Λ        so the client renders Λ behind reality at the true speed
 //   horizon = target − sampleTick, capped at horizonMax (Λ grows instead; coarse sources overshoot less)
 // When this is the last record we can send before `stale` cuts the source off, ETA is stretched to
@@ -380,9 +380,9 @@ inline void fill_pose(uint8_t* r, int avail, const Veh& v, uint32_t targetTick) 
 inline void promise_of(const Veh& v, uint64_t peer, uint32_t V, uint32_t tick, uint32_t& eta, uint32_t& target) {
     auto key = std::make_pair(peer, V);
     int I = interval_of(v, g_natGap[key]);
-    eta = tick + (uint32_t)I;
+    eta = tick + (uint32_t)I + kRefreshMargin;
     uint32_t age = tick - v.curT;
-    if (age + (uint32_t)I + kRefreshMargin > (uint32_t)g_cfg.stale) {           // final bridge to native
+    if (age + (uint32_t)I > (uint32_t)g_cfg.stale) {                            // final bridge to native
         auto eit = g_natEta.find(key);
         if (eit != g_natEta.end() && eit->second > eta) eta = eit->second;
     }
@@ -472,8 +472,8 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
         if (!due) {
             const Sent& sn = it->second;
             int I = interval_of(v, g_natGap[key]);
-            due = (v.curT > sn.srcT && tick - sn.at >= (uint32_t)I)                // fresher sample, cadence elapsed
-                  || (int32_t)(sn.eta - tick) <= (int32_t)kRefreshMargin;         // promise about to expire
+            due = tick - sn.at >= (uint32_t)I                                      // cadence elapsed: fresh sample or dead-reckon
+                  || (int32_t)(sn.eta - tick) <= (int32_t)kRefreshMargin;         // (pass-through native promise expiring)
         }
         if (!due) continue;
         cand.push_back(std::make_pair(g_natGap[key], V));
