@@ -1,11 +1,14 @@
 // relay.h — stage C: cross-peer 0x81 relay (vehicle position-sync improvement).
 //
 // The server calls SendMessageToUser once per recipient, so this process sees every peer's stream.
-// We keep, per vehicle, the freshest body0 pose + velocity (across ALL peers), and per (recipient,
-// vehicle) the last tick that recipient got a fresh update. When a distant recipient B is "due" for
-// a vehicle V that some near peer is feeding densely, we append a dead-reckoned 0x81(V) to B's
-// outgoing message — pose extrapolated to ETA = tick+interval, time field rewritten to that ETA.
-// See 目的と設計.md §3-§4.9. All functions assume the caller holds the send lock (g_cs).
+// We keep, per vehicle, the freshest body0 pose + velocity (across ALL peers) and the cadence at
+// which fresh samples arrive (I_src), and per (recipient, vehicle) the promise we last made (the
+// source sample it was built from + its ETA). When a distant recipient B is fed a vehicle V far
+// more coarsely than some near peer, every record B gets for V (rewritten native or appended) is
+// pose = predict(ETA − Λ) with ETA = tick + I_src: the client glides at the true velocity and sits
+// a steady Λ ticks behind reality. A new record goes out whenever a fresh sample exists or the last
+// promise is about to expire (dead-reckoning bridges a stalled source until `stale`).
+// See 目的と設計.md §3-§4.10. All functions assume the caller holds the send lock (g_cs).
 //
 // Observation is passive (never changes a send). Injection is gated by g_relayInject (F6, default
 // OFF) and only ever runs on a message rec::walk fully decoded, on a private COPY of the buffer.
@@ -24,11 +27,13 @@
 
 namespace relay {
 
-// LOD: per-(recipient,vehicle) append cadence I and lag Λ chosen from the vehicle's NATIVE cadence
-// (the server's own distance-LOD decision). Relay I = native_gap / kLodDenser, clamped [Imin,Imax].
-// Λ = I/2 centers the rendered path on the true curve (circle test: overshoot at small Λ vs
-// undershoot at large Λ cancel near Λ≈I/2). So far vehicles get a coarse I (cheap) + large Λ (tames
-// the coarse-cadence overshoot, at the cost of more lag — invisible at distance).
+// Client model (verified, 目的と設計.md §1-§2): a 0x81 carries a pose and an ETA tick; the client
+// glides from where it is to that pose, arriving at the ETA, and STOPS there if nothing newer came.
+// So with a record every I ticks whose pose is the true pose, the vehicle renders I ticks behind.
+// Sending pose = P(ETA − Λ) instead (extrapolated along the velocity) makes it arrive at the true
+// position Λ ticks after the sample and keep gliding along the predicted path: steady lag Λ at
+// the true speed. The price is the prediction horizon h = ETA − Λ − sampleTick, which is where
+// turning overshoot comes from; horizonMax caps it (trading lag for accuracy on coarse sources).
 // Hard compile-time maxima used for buffer/array sizing. NOT tunable at runtime (they bound the
 // allocations below); the runtime knobs in Cfg may never exceed these.
 constexpr int    kMaxPerSend = 24;   // buffer-sizing max on records appended to one message
@@ -39,9 +44,9 @@ constexpr int    kMaxRecLen  = 2048; // per-vehicle template cap
 struct Cfg {
     int    intervalMin = 5;    // finest relay cadence (ticks)
     int    intervalMax = 60;   // coarsest relay cadence (ticks)
-    int    lodDenser   = 4;    // relay this many× denser than the server's native cadence
-    double lagRatio    = 0.5;  // render lag as a fraction of the cadence interval (lag = interval × lagRatio)
-    int    lagMin      = 0;    // floor on lag (ticks): near vehicles hold this minimum lag even when interval×ratio is smaller
+    int    lodDenser   = 8;    // cost cap: relay a vehicle no denser than native_gap / lodDenser (0 = always I_src)
+    int    lag         = 5;    // target render lag Λ (ticks): the relayed vehicle sits this far behind reality
+    int    horizonMax  = 30;   // cap on the prediction horizon (ticks); beyond it Λ grows instead (limits turn overshoot)
     int    relayMinGap = 10;   // only relay when native gap exceeds this (else native is fine)
     double srcRatio    = 0.5;  // relay only when the source samples at most this fraction of the recipient's native gap
     int    stale       = 300;   // don't relay if freshest source older than this (ticks)
@@ -72,11 +77,11 @@ struct CfgField {
     const char* help;
 };
 inline const CfgField kCfgFields[] = {
-    {"intervalMin",     true,  &Cfg::intervalMin,     nullptr, false, "finest relay cadence (ticks)"},
-    {"intervalMax",     true,  &Cfg::intervalMax,     nullptr, false, "coarsest relay cadence (ticks)"},
-    {"lodDenser",       true,  &Cfg::lodDenser,       nullptr, false, "relay this many x denser than native cadence"},
-    {"lagRatio",        false, nullptr, &Cfg::lagRatio,         false, "render lag as fraction of interval"},
-    {"lagMin",          true,  &Cfg::lagMin,          nullptr, false, "minimum render lag (ticks)"},
+    {"intervalMin",     true,  &Cfg::intervalMin,     nullptr, false, "floor on I_src, the relay cadence (ticks)"},
+    {"intervalMax",     true,  &Cfg::intervalMax,     nullptr, false, "ceiling on I_src (ticks)"},
+    {"lodDenser",       true,  &Cfg::lodDenser,       nullptr, false, "cadence cost cap: no denser than native gap / this (0 = off)"},
+    {"lag",             true,  &Cfg::lag,             nullptr, false, "target render lag (ticks)"},
+    {"horizonMax",      true,  &Cfg::horizonMax,      nullptr, false, "cap on prediction horizon (ticks)"},
     {"relayMinGap",     true,  &Cfg::relayMinGap,     nullptr, false, "relay only when native gap exceeds this (ticks)"},
     {"srcRatio",        false, nullptr, &Cfg::srcRatio,         false, "relay only when source gap <= native gap x this"},
     {"stale",           true,  &Cfg::stale,           nullptr, false, "skip if source older than this (ticks)"},
@@ -108,13 +113,14 @@ inline bool set_cfg(const char* k, double v) {
     const CfgField* f = find_field(k);
     if (!f) {
         if (!strcmp(k, "hotkeys")) return true;   // removed in 0.2: accepted and ignored for old ini files
+        if (!strcmp(k, "lagRatio") || !strcmp(k, "lagMin")) return true;   // pre-I_src model: accepted and ignored
         return false;
     }
     if (f->isInt) g_cfg.*f->ip = ci(v); else g_cfg.*f->dp = v;
     // clamps
-    if (g_cfg.lodDenser < 1) g_cfg.lodDenser = 1;
-    if (g_cfg.lagRatio < 0) g_cfg.lagRatio = 0;
-    if (g_cfg.lagMin < 0) g_cfg.lagMin = 0;
+    if (g_cfg.lag < 0) g_cfg.lag = 0;
+    if (g_cfg.lodDenser < 0) g_cfg.lodDenser = 0;
+    if (g_cfg.horizonMax < 1) g_cfg.horizonMax = 1;
     if (g_cfg.srcRatio < 0) g_cfg.srcRatio = 0; if (g_cfg.srcRatio > 1) g_cfg.srcRatio = 1;
     if (g_cfg.maxPerSend > kMaxPerSend) g_cfg.maxPerSend = kMaxPerSend;
     if (g_cfg.maxPerSend < 1) g_cfg.maxPerSend = 1;
@@ -212,21 +218,6 @@ inline bool save_config_file(const char* path) {
     remove(path);
     return rename(tmp.c_str(), path) == 0;
 }
-// interval (I) and lag (Λ) for a vehicle whose native sync gap is `gap`.
-// interval = clamp(gap/lodDenser, intervalMin, intervalMax). lag = clamp(interval×lagRatio, lagMin,
-// interval): scale the render lag to the cadence via lagRatio (default 0.5 = the classic interval/2),
-// but never below the lagMin floor nor above the interval (lag past one resend cadence buys nothing).
-// A near vehicle (small interval) with lagMin set thus holds a steady minimum lag while distant ones
-// stretch out to interval×lagRatio.
-inline void lod(uint32_t gap, int& interval, int& lag) {
-    long i = (long)gap / g_cfg.lodDenser;
-    if (i < g_cfg.intervalMin) i = g_cfg.intervalMin; if (i > g_cfg.intervalMax) i = g_cfg.intervalMax;
-    interval = (int)i;
-    lag = (int)(interval * g_cfg.lagRatio);
-    if (lag < g_cfg.lagMin) lag = g_cfg.lagMin;
-    if (lag > interval) lag = interval;
-}
-
 struct Veh {
     bool has = false;
     uint32_t curT = 0, prevT = 0;                 // prevT==0 => no velocity yet
@@ -234,13 +225,19 @@ struct Veh {
     double px = 0, py = 0, pz = 0;                // previous body0 position
     float cq[4] = {0,0,0,0};                      // freshest body0 rotation quaternion (raw order)
     float pq[4] = {0,0,0,0};                      // previous body0 rotation quaternion
+    double srcGap = 0;                            // EMA of ticks between fresh samples (I_src); 0 = unknown
     int len = 0;                                  // template record length
     uint8_t bytes[kMaxRecLen];                    // latest full 0x81 record (template)
 };
+// What recipient B was last promised for vehicle V: the source sample the pose came from and the ETA.
+// A native record that passes untouched is a promise too (its own ETA), so pass-through is recorded.
+struct Sent { uint32_t srcT = 0, eta = 0, at = 0; };   // sample tick, promised ETA, send tick
+constexpr double   kSrcEmaAlpha  = 0.2;   // smoothing of I_src (≈ last 5 samples)
+constexpr uint32_t kRefreshMargin = 3;    // re-send this many ticks before the last promise expires
 
 // state (protected by the caller's send lock)
 inline std::unordered_map<uint32_t, Veh>                 g_veh;      // vehId -> freshest sample
-inline std::map<std::pair<uint64_t, uint32_t>, uint32_t> g_fresh;   // (peer,veh) -> last fresh tick (native OR inject)
+inline std::map<std::pair<uint64_t, uint32_t>, Sent>     g_sent;     // (peer,veh) -> last promise
 inline std::map<std::pair<uint64_t, uint32_t>, uint32_t> g_natLast; // (peer,veh) -> last NATIVE receipt tick
 inline std::map<std::pair<uint64_t, uint32_t>, uint32_t> g_natGap;  // (peer,veh) -> last native gap (distance proxy)
 inline std::map<std::pair<uint64_t, uint32_t>, uint32_t> g_natEta;  // (peer,veh) -> last native record's ETA (server's next-send time)
@@ -253,6 +250,16 @@ inline double D(const uint8_t* p) { double v; memcpy(&v, p, 8); return v; }
 inline void   W(uint8_t* p, double v) { memcpy(p, &v, 8); }
 inline float  F(const uint8_t* p) { float v; memcpy(&v, p, 4); return v; }
 inline void   WF(uint8_t* p, float v) { memcpy(p, &v, 4); }
+
+// Relay cadence for (recipient, vehicle) = the measured source cadence, coarsened for far recipients
+// by the cost cap (no denser than natGap / lodDenser: a 10 km vehicle need not get 12 updates/s;
+// horizonMax then turns the coarser cadence into extra lag rather than extra overshoot), clamped.
+inline int interval_of(const Veh& v, uint32_t natGap) {
+    long i = v.srcGap > 0 ? (long)(v.srcGap + 0.5) : g_cfg.intervalMax;
+    if (g_cfg.lodDenser > 0 && (long)natGap / g_cfg.lodDenser > i) i = (long)natGap / g_cfg.lodDenser;
+    if (i < g_cfg.intervalMin) i = g_cfg.intervalMin; if (i > g_cfg.intervalMax) i = g_cfg.intervalMax;
+    return (int)i;
+}
 
 // Update caches from one recipient's fully-decoded type=8 body. Passive.
 inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick) {
@@ -268,6 +275,7 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
             // dead-reckoning and injecting phantom 0x81 for a vehicle that no longer exists on the
             // client until the `stale` timeout. Dropping the source pose makes managed() return false
             // at once. On reload (unload case, same id) a fresh 0x81 repopulates g_veh, so this is safe.
+            // This is also the teleport/respawn guard: no velocity ever spans the jump.
             g_veh.erase(rec::U32(body, blen, off + 4));
         }
         if (tag == 0x81) {
@@ -276,13 +284,16 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
             auto nit = g_natLast.find(key);                                      // native cadence (distance proxy)
             if (nit != g_natLast.end() && tick > nit->second) g_natGap[key] = tick - nit->second;
             g_natLast[key] = tick;
-            g_natEta[key] = rec::U32(body, blen, off + 8);                       // server's next-send time (ETA)
-            auto it = g_fresh.find(key);
-            if (it == g_fresh.end() || tick > it->second) g_fresh[key] = tick;   // B got V natively now
+            uint32_t eta = rec::U32(body, blen, off + 8);
+            g_natEta[key] = eta;                                                 // server's next-send time (ETA)
+            Sent& sn = g_sent[key];                                              // pass-through promise (pass 1 may override)
+            if (tick >= sn.srcT) { sn.srcT = tick; sn.eta = eta; sn.at = tick; }
             if (off + 14 < blen && body[off + 14] == 1 && L <= kMaxRecLen && off + 31 + 24 <= blen) {
                 Veh& v = g_veh[V];
                 if (!v.has || tick > v.curT) {
                     if (v.has && tick > v.curT) {
+                        double dt = (double)(tick - v.curT);
+                        v.srcGap = v.srcGap > 0 ? v.srcGap + (dt - v.srcGap) * kSrcEmaAlpha : dt;
                         v.prevT = v.curT; v.px = v.cx; v.py = v.cy; v.pz = v.cz;
                         memcpy(v.pq, v.cq, sizeof(v.cq));
                     }
@@ -299,8 +310,7 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
 
 // Velocity confidence. Discontinuities (teleport / respawn) normally arrive as unload+reload, which
 // observe() handles by erasing the Veh (prevT resets, so no velocity spans the jump). gapOutlier is a
-// leftover absolute guard for a jump WITHOUT an unload; off by default since a distant-only source
-// legitimately samples at 80+ ticks and must still yield a velocity.
+// leftover absolute guard for a jump WITHOUT an unload; off by default.
 inline bool has_velocity(const Veh& v) {
     double dt = (double)v.curT - v.prevT;
     return v.prevT != 0 && dt > 0 && (g_cfg.gapOutlier <= 0 || dt <= g_cfg.gapOutlier);
@@ -334,29 +344,24 @@ inline void predict_quat(const Veh& v, uint32_t eta, float out[4]) {
 }
 
 // A vehicle is "managed" for recipient B when we should take over its sync to B: we have a fresh
-// source pose with a velocity, B is DISTANT from V (its native cadence is slower than our interval),
-// AND the source is denser than B's own feed. The last gate is what makes the relay add information:
-// the server's native record already promises "P(T) by ETA" and the client glides there smoothly;
-// if the only samples we hold ARE that same coarse stream (solo player far from V), rewriting or
-// appending predictions just replaces the server's promise with an 80-tick extrapolation from a chord
-// (tangent spikes on turns, speed steps on straights). Close vehicles (native gap <= interval) are
-// never touched — the server's dense truth is already better.
+// source pose with a velocity, B is DISTANT from V (native gap above relayMinGap), AND the source is
+// denser than B's own feed. The last gate is what makes the relay add information: the server's
+// native record already promises "P(T) by ETA" and the client glides there smoothly; if the only
+// samples we hold ARE that same coarse stream (solo player far from V), rewriting it just replaces
+// the server's promise with a long extrapolation from a chord (tangent spikes on turns).
 inline bool managed(uint64_t peer, uint32_t V, uint32_t tick) {
     auto vit = g_veh.find(V);
     if (vit == g_veh.end() || !vit->second.has) return false;
     const Veh& v = vit->second;
     if (!has_velocity(v)) return false;   // a held pose re-sent is worse than native (stop-and-go)
-    if (tick - v.curT > (uint32_t)g_cfg.stale) return false;   // source dried up
+    if (tick - v.curT > (uint32_t)g_cfg.stale) return false;   // source dried up: back to native
     auto git = g_natGap.find(std::make_pair(peer, V));
     if (git == g_natGap.end() || git->second <= (uint32_t)g_cfg.relayMinGap) return false;  // unknown or close
-    if ((double)(v.curT - v.prevT) > git->second * g_cfg.srcRatio) return false;            // source not denser than B's feed
+    if (v.srcGap <= 0 || v.srcGap > git->second * g_cfg.srcRatio) return false;            // source not denser than B's feed
     return true;
 }
 
 // Fill one 0x81 record's body0 pose (at `r`, `avail` bytes) with the pose PREDICTED at `targetTick`.
-// Does NOT touch the time/ETA field — the ETA stays the server's next-send time, so the client's
-// promise never expires early (no freeze), while the endpoint being a future-predicted pose makes it
-// glide at the true velocity. targetTick = ETA - Λ gives a steady render lag of Λ ticks.
 inline void fill_pose(uint8_t* r, int avail, const Veh& v, uint32_t targetTick) {
     if (14 < avail && r[14] == 1 && 31 + 24 <= avail) {
         float q[4]; predict_quat(v, targetTick, q);                     // rotation @r+15 (float[4])
@@ -366,10 +371,24 @@ inline void fill_pose(uint8_t* r, int avail, const Veh& v, uint32_t targetTick) 
     }
 }
 
-// targetTick = ETA - Λ, clamped to not precede the freshest sample (no negative horizon).
-inline uint32_t target_of(uint32_t eta, int lag, uint32_t curT) {
-    long tl = (long)eta - lag;
-    return (tl > (long)curT) ? (uint32_t)tl : curT;
+// The promise we make recipient B for V at send tick `tick`: ETA and the pose's target tick.
+//   ETA    = tick + I_src   (we will have a fresh sample — or re-send — by then)
+//   target = ETA − Λ        so the client renders Λ behind reality at the true speed
+//   horizon = target − sampleTick, capped at horizonMax (Λ grows instead; coarse sources overshoot less)
+// When this is the last record we can send before `stale` cuts the source off, ETA is stretched to
+// the server's own next-send time instead, so the client keeps gliding until native takes over.
+inline void promise_of(const Veh& v, uint64_t peer, uint32_t V, uint32_t tick, uint32_t& eta, uint32_t& target) {
+    auto key = std::make_pair(peer, V);
+    int I = interval_of(v, g_natGap[key]);
+    eta = tick + (uint32_t)I;
+    uint32_t age = tick - v.curT;
+    if (age + (uint32_t)I + kRefreshMargin > (uint32_t)g_cfg.stale) {           // final bridge to native
+        auto eit = g_natEta.find(key);
+        if (eit != g_natEta.end() && eit->second > eta) eta = eit->second;
+    }
+    long tl = (long)eta - g_cfg.lag;
+    if (tl - (long)v.curT > g_cfg.horizonMax) tl = (long)v.curT + g_cfg.horizonMax;
+    target = tl > (long)v.curT ? (uint32_t)tl : v.curT;
 }
 
 // Per-recipient bandwidth budget (safety valve). Returns true and charges `addLen` if within cap.
@@ -382,11 +401,12 @@ inline bool budget_ok(uint64_t peer, uint32_t tick, int addLen) {
 }
 
 // Build the relay message for recipient `peer` into `out` (>= outcap bytes). Two passes on a COPY of
-// the original: (1) for any native 0x81 of a managed (distant) vehicle, KEEP its ETA and replace the
-// pose with predict(ETA-Λ) — the server's long glide becomes a correct-velocity glide, no freeze;
-// (2) APPEND, at the re-aim cadence, a predicted 0x81 for managed vehicles not present this message,
-// using ETA = the server's next-send time (E_nat) so those promises are also freeze-safe. Patches
-// total (+4) and recordCount (body+16). Returns the new cub if ANYTHING changed, else 0.
+// the original: (1) every native 0x81 of a managed vehicle gets our promise (ETA + predicted pose)
+// — leaving it alone would let the server's long-ETA glide override ours and bring the lag back;
+// (2) APPEND a promised 0x81 for each managed vehicle not present that is due: a fresher source
+// sample exists than the one B's last promise was built from, or that promise is about to expire
+// (dead-reckon on the old sample). Patches total (+4) and recordCount (body+16). Returns the new
+// cub if ANYTHING changed, else 0.
 inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* out, int outcap, uint32_t tick) {
     // Rewound-world-tick guard: never modify a message whose world tick is not newer than the last
     // one we injected into for this recipient. A server rewind / resend of an older tick must pass
@@ -401,7 +421,7 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
     uint8_t* body = out + 8; int blen = cub - 8;
     std::unordered_set<uint32_t> handled;
 
-    // pass 1: rewrite the pose of native records already in the message (keep their ETA)
+    // pass 1: rewrite native records of managed vehicles into our promise
     int rewrote = 0, count = (int)rec::U32(body, blen, 16), off = 20;
     for (int i = 0; i < count; i++) {
         if (off >= blen) break;
@@ -411,18 +431,12 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
         if (tag == 0x81) {
             uint32_t V = rec::U32(body, blen, off + 4);
             if (managed(peer, V, tick)) {
-                int interval, lag; lod(g_natGap[std::make_pair(peer, V)], interval, lag);
-                // Deadline = OUR next relay send (tick + interval), NOT the server's far ETA. The
-                // server's ETA for a distant vehicle is up to ~720t (12s) ahead; using it as the
-                // client's glide deadline forces a correct-velocity endpoint ~12s extrapolated out — the
-                // vehicle then drifts toward a far predicted point and never tracks reality (the observed
-                // freeze). Because we re-send at our cadence (dense LOD), a short tick+interval deadline
-                // is always refreshed before it expires, so no freeze; extrapolation is bounded to lag.
-                uint32_t D = tick + (uint32_t)interval;
-                memcpy(body + off + 8, &D, 4);                           // ETA = our next-send tick
-                fill_pose(body + off, blen - off, g_veh[V], target_of(D, lag, g_veh[V].curT));
+                const Veh& v = g_veh[V];
+                uint32_t eta, target; promise_of(v, peer, V, tick, eta, target);
+                memcpy(body + off + 8, &eta, 4);
+                fill_pose(body + off, blen - off, v, target);
                 handled.insert(V); rewrote++;
-                g_fresh[std::make_pair(peer, V)] = tick;
+                g_sent[std::make_pair(peer, V)] = Sent{ v.curT, eta, tick };
             }
         }
         off += L;
@@ -432,35 +446,35 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
     // (smallest native gap = highest relevance) so the per-recipient budget favours close vehicles.
     std::vector<std::pair<uint32_t, uint32_t>> cand;                     // (gap, veh)
     for (auto& kv : g_veh) {
-        uint32_t V = kv.first;
-        if (handled.count(V) || !kv.second.has || kv.second.len <= 0) continue;
+        uint32_t V = kv.first; const Veh& v = kv.second;
+        if (handled.count(V) || !v.has || v.len <= 0) continue;
         if (!managed(peer, V, tick)) continue;
         auto key = std::make_pair(peer, V);
-        uint32_t gap = g_natGap[key];
-        int interval, lag; lod(gap, interval, lag);
-        auto it = g_fresh.find(key);
-        if (it != g_fresh.end() && tick - it->second < (uint32_t)interval) continue;  // re-aimed within its cadence
-        cand.push_back(std::make_pair(gap, V));
+        auto it = g_sent.find(key);
+        bool due = it == g_sent.end();
+        if (!due) {
+            const Sent& sn = it->second;
+            int I = interval_of(v, g_natGap[key]);
+            due = (v.curT > sn.srcT && tick - sn.at >= (uint32_t)I)                // fresher sample, cadence elapsed
+                  || (int32_t)(sn.eta - tick) <= (int32_t)kRefreshMargin;         // promise about to expire
+        }
+        if (!due) continue;
+        cand.push_back(std::make_pair(g_natGap[key], V));
     }
     std::sort(cand.begin(), cand.end());
 
     int wpos = cub, added = 0, addedBytes = 0;
     for (auto& c : cand) {
         if (added >= g_cfg.maxPerSend) break;
-        uint32_t V = c.second; Veh& v = g_veh[V];
+        uint32_t V = c.second; const Veh& v = g_veh[V];
         if (wpos + v.len > outcap) continue;
         if (!budget_ok(peer, tick, v.len)) continue;                    // per-recipient cap: skip (coarsen)
-        auto key = std::make_pair(peer, V);
-        int interval, lag; lod(c.first, interval, lag);
-        // Deadline = our own next relay send (tick + interval), so the client glides to a pose only
-        // `lag` ahead and we refresh it every `interval` ticks. (Using the server's far ETA here made
-        // the client aim ~12s out and freeze — see pass 1.)
-        uint32_t Eapp = tick + (uint32_t)interval;
+        uint32_t eta, target; promise_of(v, peer, V, tick, eta, target);
         memcpy(out + wpos, v.bytes, v.len);
-        memcpy(out + wpos + 8, &Eapp, 4);                                // ETA = our next-send tick
-        fill_pose(out + wpos, v.len, v, target_of(Eapp, lag, v.curT));
+        memcpy(out + wpos + 8, &eta, 4);
+        fill_pose(out + wpos, v.len, v, target);
         wpos += v.len; addedBytes += v.len; added++;
-        g_fresh[key] = tick;
+        g_sent[std::make_pair(peer, V)] = Sent{ v.curT, eta, tick };
     }
 
     if (rewrote == 0 && added == 0) return 0;
