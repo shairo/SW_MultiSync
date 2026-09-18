@@ -1,0 +1,12 @@
+# Build artifacts
+build/
+dist/
+swhook.dll
+bin/
+obj/
+
+# Capture / log data (large binary session recordings)
+captures/
+
+# Packaged distributables
+*.zip

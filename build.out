@@ -1,0 +1,12 @@
+'vswhere.exe' は、内部コマンドまたは外部コマンド、
+操作可能なプログラムまたはバッチ ファイルとして認識されていません。
+=== swhook.dll ===
+dllmain.cpp
+C:\Users\Shairo\CommonProjects\sw-serverhook2\src\hook\dllmain.cpp(1): warning C4819: ファイルは、現在のコード ページ (932) で表示できない文字を含んでいます。データの損失を防ぐために、ファイルを Unicode 形式で保存してください。
+C:\Users\Shairo\CommonProjects\sw-serverhook2\src\hook\steam_min.h(1): warning C4819: ファイルは、現在のコード ページ (932) で表示できない文字を含んでいます。データの損失を防ぐために、ファイルを Unicode 形式で保存してください。
+C:\Users\Shairo\CommonProjects\sw-serverhook2\src\hook\dllmain.cpp(136): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\Shairo\CommonProjects\sw-serverhook2\src\hook\dllmain.cpp(138): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+=== inject.exe ===
+inject.cpp
+C:\Users\Shairo\CommonProjects\sw-serverhook2\src\inject\inject.cpp(1): warning C4819: ファイルは、現在のコード ページ (932) で表示できない文字を含んでいます。データの損失を防ぐために、ファイルを Unicode 形式で保存してください。
+=== done: C:\Users\Shairo\CommonProjects\sw-serverhook2\build ===
