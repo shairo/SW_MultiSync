@@ -29,9 +29,9 @@ cl /nologo /std:c++17 /O2 /EHsc /W3 ^
    /link kernel32.lib advapi32.lib ws2_32.lib
 if errorlevel 1 exit /b 1
 
-echo === SWSyncTool.exe (GUI) ===
+echo === SWMultiSync.exe (GUI) ===
 cl /nologo /std:c++17 /O2 /EHsc /W3 /utf-8 ^
-   /Fe:"%OUT%\SWSyncTool.exe" /Fo:"%OUT%\\" ^
+   /Fe:"%OUT%\SWMultiSync.exe" /Fo:"%OUT%\\" ^
    "%ROOT%src\gui\gui.cpp" ^
    /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTUAC:"level='requireAdministrator' uiAccess='false'" ^
    kernel32.lib user32.lib gdi32.lib comctl32.lib shell32.lib advapi32.lib ws2_32.lib

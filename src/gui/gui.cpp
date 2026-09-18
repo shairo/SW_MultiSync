@@ -1,4 +1,4 @@
-// SWSyncTool.exe — Win32 GUI front-end for swhook.dll. Zero dependencies (user32/comctl32 only).
+// SWMultiSync.exe — Win32 GUI front-end for swhook.dll. Zero dependencies (user32/comctl32 only).
 // Responsibilities: watch for server64.exe, inject swhook.dll (auto by default), then act as an
 // IPC client (ipc_client.h) polling the DLL once a second. Every action is one IPC command from
 // ipc-protocol.md — the GUI has no private path into the DLL.
@@ -175,12 +175,12 @@ static void cfg_set(const std::string& key, double val) {
     if (g_dllUp) {
         char extra[256]; snprintf(extra, sizeof extra, "\"key\":\"%s\",\"value\":%g", key.c_str(), val);
         std::string r = ipc("config.set", extra);
-        if (!ipc_ok(r)) { MessageBoxW(g_wnd, (L"設定に失敗しました: " + W(Sx(r.c_str(), "error"))).c_str(), L"SWSyncTool", MB_ICONWARNING); return; }
+        if (!ipc_ok(r)) { MessageBoxW(g_wnd, (L"設定に失敗しました: " + W(Sx(r.c_str(), "error"))).c_str(), L"SWMultiSync", MB_ICONWARNING); return; }
     } else {
         relay::g_cfg = relay::Cfg();
         relay::load_config_file(g_iniPath.c_str());     // re-read: never clobber concurrent edits
-        if (!relay::set_cfg(key.c_str(), val)) { MessageBoxW(g_wnd, L"不明な設定項目です。", L"SWSyncTool", MB_ICONWARNING); return; }
-        if (!relay::save_config_file(g_iniPath.c_str())) { MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWSyncTool", MB_ICONWARNING); return; }
+        if (!relay::set_cfg(key.c_str(), val)) { MessageBoxW(g_wnd, L"不明な設定項目です。", L"SWMultiSync", MB_ICONWARNING); return; }
+        if (!relay::save_config_file(g_iniPath.c_str())) { MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWMultiSync", MB_ICONWARNING); return; }
     }
     refresh_config();
 }
@@ -195,7 +195,7 @@ static void ini_set(const char* key, double val) {
     relay::load_config_file(g_iniPath.c_str());
     relay::set_cfg(key, val);
     if (!relay::save_config_file(g_iniPath.c_str()))
-        MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWSyncTool", MB_ICONWARNING);
+        MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWMultiSync", MB_ICONWARNING);
 }
 static void startup_load() {
     relay::g_cfg = relay::Cfg();
@@ -217,13 +217,13 @@ static void startup_save() {
     relay::set_cfg("ipcPort", _wtoi(pw));
     relay::set_cfg("relay",      IsDlgButtonChecked(g_wnd, ID_ST_RELAY) == BST_CHECKED ? 1 : 0);
     bool ok = relay::save_config_file(g_iniPath.c_str());
-    if (!ok) { MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWSyncTool", MB_ICONWARNING); return; }
+    if (!ok) { MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWMultiSync", MB_ICONWARNING); return; }
     bool portChanged = relay::g_cfg.ipcPort != g_port;
     startup_load();
     refresh_config();
     MessageBoxW(g_wnd, portChanged && g_dllUp
         ? L"保存しました。ポート変更はサーバーを再起動して注入し直すと有効になります（それまでは現在のポートで接続を続けます）。"
-        : L"保存しました。次に注入したときから有効になります。", L"SWSyncTool", MB_ICONINFORMATION);
+        : L"保存しました。次に注入したときから有効になります。", L"SWMultiSync", MB_ICONINFORMATION);
 }
 
 // ---------------------------------------------------------------- rendering
@@ -414,9 +414,9 @@ static void on_command(int id) {
     switch (id) {
     case ID_INJECT_BTN: {
         DWORD pid = injector::find_pid("server64.exe");
-        if (!pid) { MessageBoxW(g_wnd, L"server64.exe が起動していません。", L"SWSyncTool", MB_ICONINFORMATION); return; }
+        if (!pid) { MessageBoxW(g_wnd, L"server64.exe が起動していません。", L"SWMultiSync", MB_ICONINFORMATION); return; }
         std::string err; injector::Result r = injector::inject(pid, g_dllPath.c_str(), err);
-        if (r == injector::Failed) MessageBoxW(g_wnd, (L"注入に失敗しました:\n" + W(err)).c_str(), L"SWSyncTool", MB_ICONERROR);
+        if (r == injector::Failed) MessageBoxW(g_wnd, (L"注入に失敗しました:\n" + W(err)).c_str(), L"SWMultiSync", MB_ICONERROR);
         poll(); break; }
     case ID_RELAY_BTN: ipc("relay.set", g_relay ? "\"enabled\":false" : "\"enabled\":true"); poll(); break;
     case ID_CFG_APPLY: {
@@ -425,7 +425,7 @@ static void on_command(int id) {
         char n8[64]; WideCharToMultiByte(CP_UTF8, 0, name, -1, n8, 64, nullptr, nullptr);
         cfg_set(n8, _wtof(val)); break; }
     case ID_CFG_SAVE: { std::string r = ipc("config.save");
-        MessageBoxW(g_wnd, ipc_ok(r) ? (L"保存しました:\n" + W(Sx(r.c_str(), "path"))).c_str() : L"保存に失敗しました。", L"SWSyncTool", ipc_ok(r) ? MB_ICONINFORMATION : MB_ICONWARNING); break; }
+        MessageBoxW(g_wnd, ipc_ok(r) ? (L"保存しました:\n" + W(Sx(r.c_str(), "path"))).c_str() : L"保存に失敗しました。", L"SWMultiSync", ipc_ok(r) ? MB_ICONINFORMATION : MB_ICONWARNING); break; }
     case ID_CFG_RELOAD: ipc("config.reload"); refresh_config(); break;
     case ID_AUTO_CHK: g_autoInject = IsDlgButtonChecked(g_wnd, ID_AUTO_CHK) == BST_CHECKED; ini_set("autoInject", g_autoInject ? 1 : 0); break;
     case ID_CAP_AUTO: ini_set("capture", IsDlgButtonChecked(g_wnd, ID_CAP_AUTO) == BST_CHECKED ? 1 : 0); break;
@@ -470,7 +470,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
     g_dllPath = injector::default_dll_path();
     g_iniPath = injector::exe_dir() + "swhook.ini";
     if (!injector::is_admin())
-        MessageBoxW(nullptr, L"管理者権限がありません。注入には管理者権限が必要です。\n右クリック →「管理者として実行」で起動してください。", L"SWSyncTool", MB_ICONWARNING);
+        MessageBoxW(nullptr, L"管理者権限がありません。注入には管理者権限が必要です。\n右クリック →「管理者として実行」で起動してください。", L"SWMultiSync", MB_ICONWARNING);
 
     HDC dc = GetDC(nullptr); g_s = GetDeviceCaps(dc, LOGPIXELSX) / 96.0; ReleaseDC(nullptr, dc);
     NONCLIENTMETRICSW ncm{ sizeof ncm }; SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0);
@@ -479,11 +479,11 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
     ncm.lfMessageFont.lfHeight = -S(16); ncm.lfMessageFont.lfWeight = FW_BOLD;
     g_fontBig = CreateFontIndirectW(&ncm.lfMessageFont);
 
-    WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = hi; wc.lpszClassName = L"SWSyncToolMain";
+    WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = hi; wc.lpszClassName = L"SWMultiSyncMain";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     RegisterClassW(&wc);
     RECT r{ 0, 0, S(912), S(632) }; AdjustWindowRect(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
-    g_wnd = CreateWindowW(wc.lpszClassName, fmtw(L"SW Sync Tool v%hs", SWHOOK_VERSION).c_str(),
+    g_wnd = CreateWindowW(wc.lpszClassName, fmtw(L"SW MultiSync v%hs", SWHOOK_VERSION).c_str(),
                           WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                           CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, hi, nullptr);
     build_ui();
