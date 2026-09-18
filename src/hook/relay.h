@@ -82,7 +82,7 @@ inline const CfgField kCfgFields[] = {
     {"lodDenser",       true,  &Cfg::lodDenser,       nullptr, false, "cadence cost cap: no denser than native gap / this (0 = off)"},
     {"lag",             true,  &Cfg::lag,             nullptr, false, "target render lag (ticks)"},
     {"horizonMax",      true,  &Cfg::horizonMax,      nullptr, false, "cap on prediction horizon (ticks)"},
-    {"relayMinGap",     true,  &Cfg::relayMinGap,     nullptr, false, "relay only when native gap exceeds this (ticks)"},
+    {"relayMinGap",     true,  &Cfg::relayMinGap,     nullptr, false, "append only when native gap exceeds this (ticks); below it native records are still rewritten"},
     {"srcRatio",        false, nullptr, &Cfg::srcRatio,         false, "relay only when source gap <= native gap x this"},
     {"stale",           true,  &Cfg::stale,           nullptr, false, "skip if source older than this (ticks)"},
     {"gapOutlier",      false, nullptr, &Cfg::gapOutlier,       false, "reject velocity from gaps larger than this (ticks); 0 = off"},
@@ -401,8 +401,8 @@ inline bool budget_ok(uint64_t peer, uint32_t tick, int addLen) {
 }
 
 // Build the relay message for recipient `peer` into `out` (>= outcap bytes). Two passes on a COPY of
-// the original: (1) every native 0x81 of a managed vehicle gets our promise (ETA + predicted pose)
-// — leaving it alone would let the server's long-ETA glide override ours and bring the lag back;
+// the original: (1) every native 0x81 with a known velocity gets a predicted pose (managed vehicles
+// also get ETA = tick + I — leaving it alone would let the server's long-ETA glide override ours);
 // (2) APPEND a promised 0x81 for each managed vehicle not present that is due: a fresher source
 // sample exists than the one B's last promise was built from, or that promise is about to expire
 // (dead-reckon on the old sample). Patches total (+4) and recordCount (body+16). Returns the new
@@ -421,7 +421,11 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
     uint8_t* body = out + 8; int blen = cub - 8;
     std::unordered_set<uint32_t> handled;
 
-    // pass 1: rewrite native records of managed vehicles into our promise
+    // pass 1: rewrite native records into our promise. Managed vehicles get ETA = tick + I as well;
+    // every other vehicle with a velocity and a native gap above `lag` keeps the server's ETA and only
+    // has its pose moved to predict(ETA − Λ): the horizon is natGap − Λ (tiny for near vehicles, capped
+    // by horizonMax for a coarse-only source), so even vehicles below relayMinGap — or a solo player's
+    // own far vehicle — render closer to Λ behind instead of a full native interval behind.
     int rewrote = 0, count = (int)rec::U32(body, blen, 16), off = 20;
     for (int i = 0; i < count; i++) {
         if (off >= blen) break;
@@ -430,13 +434,26 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
         if (L <= 0) break;
         if (tag == 0x81) {
             uint32_t V = rec::U32(body, blen, off + 4);
-            if (managed(peer, V, tick)) {
-                const Veh& v = g_veh[V];
-                uint32_t eta, target; promise_of(v, peer, V, tick, eta, target);
-                memcpy(body + off + 8, &eta, 4);
+            auto key = std::make_pair(peer, V);
+            auto vit = g_veh.find(V);
+            if (vit != g_veh.end() && vit->second.has && has_velocity(vit->second)) {
+                const Veh& v = vit->second;
+                bool mg = managed(peer, V, tick);
+                uint32_t eta = 0, target = 0;
+                if (mg) {
+                    promise_of(v, peer, V, tick, eta, target);
+                    memcpy(body + off + 8, &eta, 4);
+                } else {
+                    auto git = g_natGap.find(key);
+                    if (git == g_natGap.end() || git->second <= (uint32_t)g_cfg.lag) { off += L; continue; }
+                    eta = rec::U32(body, blen, off + 8);                             // server's ETA, kept
+                    long tl = (long)eta - g_cfg.lag;
+                    if (tl - (long)v.curT > g_cfg.horizonMax) tl = (long)v.curT + g_cfg.horizonMax;
+                    target = tl > (long)v.curT ? (uint32_t)tl : v.curT;
+                }
                 fill_pose(body + off, blen - off, v, target);
                 handled.insert(V); rewrote++;
-                g_sent[std::make_pair(peer, V)] = Sent{ v.curT, eta, tick };
+                g_sent[key] = Sent{ v.curT, eta, tick };
             }
         }
         off += L;
