@@ -43,6 +43,7 @@ struct Cfg {
     double lagRatio    = 0.5;  // render lag as a fraction of the cadence interval (lag = interval × lagRatio)
     int    lagMin      = 0;    // floor on lag (ticks): near vehicles hold this minimum lag even when interval×ratio is smaller
     int    relayMinGap = 10;   // only relay when native gap exceeds this (else native is fine)
+    double srcRatio    = 0.5;  // relay only when the source samples at most this fraction of the recipient's native gap
     int    stale       = 300;   // don't relay if freshest source older than this (ticks)
     double gapOutlier  = 0;    // reject velocity from a sample gap larger than this (ticks); <=0 = off
     int    maxPerSend  = 24;   // records appended to one message (clamped to kMaxPerSend)
@@ -77,6 +78,7 @@ inline const CfgField kCfgFields[] = {
     {"lagRatio",        false, nullptr, &Cfg::lagRatio,         false, "render lag as fraction of interval"},
     {"lagMin",          true,  &Cfg::lagMin,          nullptr, false, "minimum render lag (ticks)"},
     {"relayMinGap",     true,  &Cfg::relayMinGap,     nullptr, false, "relay only when native gap exceeds this (ticks)"},
+    {"srcRatio",        false, nullptr, &Cfg::srcRatio,         false, "relay only when source gap <= native gap x this"},
     {"stale",           true,  &Cfg::stale,           nullptr, false, "skip if source older than this (ticks)"},
     {"gapOutlier",      false, nullptr, &Cfg::gapOutlier,       false, "reject velocity from gaps larger than this (ticks); 0 = off"},
     {"maxPerSend",      true,  &Cfg::maxPerSend,      nullptr, false, "max records appended per message (<=24)"},
@@ -113,6 +115,7 @@ inline bool set_cfg(const char* k, double v) {
     if (g_cfg.lodDenser < 1) g_cfg.lodDenser = 1;
     if (g_cfg.lagRatio < 0) g_cfg.lagRatio = 0;
     if (g_cfg.lagMin < 0) g_cfg.lagMin = 0;
+    if (g_cfg.srcRatio < 0) g_cfg.srcRatio = 0; if (g_cfg.srcRatio > 1) g_cfg.srcRatio = 1;
     if (g_cfg.maxPerSend > kMaxPerSend) g_cfg.maxPerSend = kMaxPerSend;
     if (g_cfg.maxPerSend < 1) g_cfg.maxPerSend = 1;
     if (g_cfg.budgetWindow < 1) g_cfg.budgetWindow = 1;
@@ -331,15 +334,22 @@ inline void predict_quat(const Veh& v, uint32_t eta, float out[4]) {
 }
 
 // A vehicle is "managed" for recipient B when we should take over its sync to B: we have a fresh
-// source pose AND B is DISTANT from V (its native cadence is slower than our interval). Close
-// vehicles (native gap <= interval) are never touched — the server's dense truth is already better.
+// source pose with a velocity, B is DISTANT from V (its native cadence is slower than our interval),
+// AND the source is denser than B's own feed. The last gate is what makes the relay add information:
+// the server's native record already promises "P(T) by ETA" and the client glides there smoothly;
+// if the only samples we hold ARE that same coarse stream (solo player far from V), rewriting or
+// appending predictions just replaces the server's promise with an 80-tick extrapolation from a chord
+// (tangent spikes on turns, speed steps on straights). Close vehicles (native gap <= interval) are
+// never touched — the server's dense truth is already better.
 inline bool managed(uint64_t peer, uint32_t V, uint32_t tick) {
     auto vit = g_veh.find(V);
     if (vit == g_veh.end() || !vit->second.has) return false;
-    if (!has_velocity(vit->second)) return false;   // a held pose re-sent is worse than native (stop-and-go)
-    if (tick - vit->second.curT > (uint32_t)g_cfg.stale) return false;   // source dried up
+    const Veh& v = vit->second;
+    if (!has_velocity(v)) return false;   // a held pose re-sent is worse than native (stop-and-go)
+    if (tick - v.curT > (uint32_t)g_cfg.stale) return false;   // source dried up
     auto git = g_natGap.find(std::make_pair(peer, V));
     if (git == g_natGap.end() || git->second <= (uint32_t)g_cfg.relayMinGap) return false;  // unknown or close
+    if ((double)(v.curT - v.prevT) > git->second * g_cfg.srcRatio) return false;            // source not denser than B's feed
     return true;
 }
 
