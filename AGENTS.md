@@ -69,6 +69,10 @@ one vtable slot and log a buffer.
   `capture`, `ipcPort`, `autoInject`) are edited on its startup tab by reading/writing swhook.ini
   directly via `relay.h`; everything else goes through IPC.
 - `build.bat` — builds DLL, inject.exe, swctl.exe, SWSyncTool.exe.
+- Dev loop without a server restart: `swctl unload` (IPC `unload`) restores the vtable, waits for
+  in-flight hook calls, joins the IPC/Worker threads by handle, closes files and the instance mutex,
+  then `FreeLibraryAndExitThread`s from its own thread. Then `build.bat` + `swctl inject`. Counters
+  and relay caches reset. Dev aid only — not exposed in the GUI or the end-user README.
 - `package.bat` — build + stage `dist\SW_SyncTool_v<ver>\` + zip. Ships GUI, CLI, DLL, ini (with
   `relay=1` forced), `packaging/README_*.txt`, `ipc-protocol.md`. Version = `src/common/version.h`.
   Keep .bat files ASCII-only (cmd parses them in the OEM codepage).

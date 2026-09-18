@@ -36,6 +36,7 @@ tool; the bundled GUI / `swctl` use exactly this and nothing else.
 | `config.set` | `key`, `value` | `key`, `value` (after clamping), `startupOnly` |
 | `config.reload` | – | `keys` applied, `config{}` |
 | `config.save` | – | `path` (writes swhook.ini, comments preserved) |
+| `unload` | – | `hooked` — restores the vtable, drains in-flight calls, closes IPC/files and unmaps the DLL (~1 s later). Development aid: `swctl unload && build && swctl inject` iterates without a server restart. All counters/caches reset. |
 
 `startupOnly` keys (`relay`, `capture`, `ipcPort`) change the stored value only; the running
 behaviour of those is controlled live via `relay.set` / `capture.*`, and the port needs a restart.

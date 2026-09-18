@@ -28,6 +28,7 @@ static void usage() {
            "  config set <key> <value>   change a knob live (see 'config get' for keys)\n"
            "  config reload|save         re-read / write back swhook.ini\n"
            "  version | ping             client and DLL versions / reachability\n"
+           "  unload                     restore hooks and unmap the DLL (dev aid; then inject again)\n"
            "  raw <json>                 send a raw request line\n"
            "--json prints the DLL's raw response instead of the table.\n", SWHOOK_VERSION);
 }
@@ -174,6 +175,7 @@ int main(int argc, char** argv) {
         else printf("dll   not reachable on port %d\n", g_port);
         return 0;
     }
+    if (cmd == "unload")   { r = run("unload");       if (r.empty() || !ok_of(r)) return 1; if (!g_json) printf("unload requested; DLL unmaps in ~1 s\n"); return 0; }
     if (cmd == "ping")     { r = run("ping");         if (r.empty() || !ok_of(r)) return 1; if (!g_json) printf("ok dll %s\n", S(r.c_str(), "version").c_str()); return 0; }
     if (cmd == "status")   { r = run("status");       if (r.empty() || !ok_of(r)) return 1; if (!g_json) print_status(r); return 0; }
     if (cmd == "peers")    { r = run("peers.get");    if (r.empty() || !ok_of(r)) return 1; if (!g_json) print_peers(r, false); return 0; }

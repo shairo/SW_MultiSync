@@ -77,6 +77,12 @@ constexpr uint32_t kBulkKeepHead  = 256;
 static SendMessageToUser_t        g_origSend = nullptr;
 static ReceiveMessagesOnChannel_t g_origRecv = nullptr;
 static void** g_vtable = nullptr;
+static volatile long g_inflight = 0;     // game threads currently inside a hook (unload waits for 0)
+static HANDLE g_instMutex = nullptr;     // double-injection guard; released on unload so re-inject works
+static HANDLE g_workerThread = nullptr;  // Worker's handle: unload waits for it (it may still be in the Steam wait)
+static volatile bool g_stopping = false; // tells Worker's wait loops to give up
+// RAII bump of g_inflight for the two hook bodies.
+struct InFlight { InFlight() { InterlockedIncrement(&g_inflight); } ~InFlight() { InterlockedDecrement(&g_inflight); } };
 
 // ---- .swcap container (v2) ----
 // file header: "SWCAP" 0x02  (6 bytes)
@@ -206,6 +212,7 @@ static void edit81_offset(uint8_t* body, int blen) {
 // ---- hooks ----
 static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
                            const void* data, uint32_t cub, int32_t flags, int32_t ch) {
+    InFlight guard;
     const uint8_t* b = static_cast<const uint8_t*>(data);
     bool head = cub >= 28 && *reinterpret_cast<const uint32_t*>(b) == 0;   // frag==0 (single-frame head)
     const uint8_t* body = b + 8; int blen = (int)cub - 8;
@@ -270,6 +277,7 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
 }
 
 static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** ppOut, int32_t nMax) {
+    InFlight guard;
     int32_t got = g_origRecv(self, ch, ppOut, nMax);   // fills ppOut with already-decrypted msgs
     if (got > 0 && ppOut) {
         EnterCriticalSection(&g_cs);
@@ -405,6 +413,43 @@ static void write_vehicles(json::JsonW& w) {
     w.end();
 }
 
+static void* swap_slot(int index, void* repl);   // defined with the install code below
+
+// ---- unload (development aid) ----
+// Restores the vtable, waits for in-flight hook calls to drain, tears down IPC and files, then
+// unmaps the DLL from a thread of its own so the next `swctl inject` loads fresh code without a
+// server restart. Ordering matters: nothing that could still be running (game threads inside the
+// hooks, IPC threads) may exist when FreeLibraryAndExitThread runs. The residual risk — a game
+// thread that read the old slot value and got descheduled for longer than the grace period — is
+// accepted for a development tool; players are not disconnected by this.
+static DWORD WINAPI UnloadThread(LPVOID) {
+    Sleep(50);                                              // let the "ok" reply leave the socket
+    if (g_hooked && g_vtable) {
+        swap_slot(kVT_SendMessageToUser, (void*)g_origSend);
+        swap_slot(kVT_ReceiveMessagesOnChannel, (void*)g_origRecv);
+        g_hooked = false;
+    }
+    ULONGLONG t0 = GetTickCount64();
+    while (g_inflight > 0 && GetTickCount64() - t0 < 5000) Sleep(5);
+    Sleep(500);                                             // grace for a thread already past the slot read
+    g_stopping = true;
+    bool ipcClean = ipc::stop(3000);
+    bool workerDone = !g_workerThread || WaitForSingleObject(g_workerThread, 3000) == WAIT_OBJECT_0;
+    if (g_workerThread) { CloseHandle(g_workerThread); g_workerThread = nullptr; }
+    EnterCriticalSection(&g_cs);
+    logf("== unload: hooks restored, inflight=%ld, ipc %s, worker %s ==\n", g_inflight,
+         ipcClean ? "stopped" : "TIMEOUT (leaking DLL)", workerDone ? "exited" : "STUCK (leaking DLL)");
+    logflush();
+    if (g_cap) { fclose(g_cap); g_cap = nullptr; }
+    if (g_wf)  { fclose(g_wf);  g_wf  = nullptr; }
+    if (g_log) { fclose(g_log); g_log = nullptr; }
+    LeaveCriticalSection(&g_cs);
+    if (g_instMutex) { CloseHandle(g_instMutex); g_instMutex = nullptr; }
+    if (!ipcClean || !workerDone || g_inflight > 0) return 0;   // a thread may still run our code: stay mapped
+    DeleteCriticalSection(&g_cs);
+    FreeLibraryAndExitThread(g_hmod, 0);
+}
+
 static std::string ipc_handle(const std::string& line) {
     std::string cmd;
     json::JsonW w; w.obj();
@@ -466,6 +511,10 @@ static std::string ipc_handle(const std::string& line) {
         int n = load_relay_config();
         w.kvb("ok", n >= 0).kv("keys", n); write_config(w);
         if (n < 0) w.kv("error", "swhook.ini not found");
+    } else if (cmd == "unload") {
+        HANDLE t = CreateThread(nullptr, 0, UnloadThread, nullptr, 0, nullptr);
+        if (t) { CloseHandle(t); w.kvb("ok", true).kvb("hooked", g_hooked); logf("== unload requested (ipc) ==\n"); logflush(); }
+        else w.kvb("ok", false).kv("error", "CreateThread failed");
     } else if (cmd == "config.save") {
         char ini[MAX_PATH];
         bool ok = relay::save_config_file(BasePath(ini, MAX_PATH, "swhook.ini"));
@@ -505,8 +554,9 @@ static DWORD WINAPI Worker(LPVOID) {
     // — bail out before touching anything (no CS, no files, no vtable swap).
     char mname[64];
     _snprintf_s(mname, _TRUNCATE, "swhook_installed_%lu", GetCurrentProcessId());
-    HANDLE mtx = CreateMutexA(nullptr, FALSE, mname);   // leaked on purpose (lives for the process)
-    if (mtx && GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    HANDLE mtx = CreateMutexA(nullptr, FALSE, mname);   // held for the DLL's lifetime; closed on unload
+    if (mtx && GetLastError() == ERROR_ALREADY_EXISTS) { if (mtx) CloseHandle(mtx); return 0; }
+    g_instMutex = mtx;
 
     InitializeCriticalSection(&g_cs);
     g_startMs = GetTickCount64();
@@ -539,7 +589,8 @@ static DWORD WINAPI Worker(LPVOID) {
     logflush();
 
     HMODULE api = nullptr;
-    for (int i = 0; i < 600 && !api; ++i) { api = GetModuleHandleA("steam_api64.dll"); if (!api) Sleep(100); }
+    for (int i = 0; i < 600 && !api && !g_stopping; ++i) { api = GetModuleHandleA("steam_api64.dll"); if (!api) Sleep(100); }
+    if (g_stopping) return 0;
     if (!api) { fail("steam_api64.dll never loaded"); return 0; }
 
     auto GetHUser = reinterpret_cast<HSteamUser(*)()>(
@@ -549,11 +600,12 @@ static DWORD WINAPI Worker(LPVOID) {
     if (!GetHUser || !FindOrCreate) { fail("missing steam_api exports"); return 0; }
 
     void* iface = nullptr;
-    for (int i = 0; i < 1200 && !iface; ++i) {
+    for (int i = 0; i < 1200 && !iface && !g_stopping; ++i) {
         HSteamUser h = GetHUser();
         if (h) iface = FindOrCreate(h, "SteamNetworkingMessages002");
         if (!iface) Sleep(100);
     }
+    if (g_stopping) return 0;
     if (!iface) { fail("no SteamNetworkingMessages002"); return 0; }
 
     g_vtable = *reinterpret_cast<void***>(iface);
@@ -573,7 +625,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_hmod = h;                       // remember our own module for BaseDir()
         DisableThreadLibraryCalls(h);
-        CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
+        g_workerThread = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
     }
     return TRUE;
 }

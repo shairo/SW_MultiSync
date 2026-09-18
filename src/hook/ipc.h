@@ -28,7 +28,29 @@ inline SOCKET   g_listen = INVALID_SOCKET;
 inline int      g_port   = 0;
 inline volatile long g_clients = 0;          // currently connected clients (for status)
 inline volatile long g_requests = 0;         // total requests served
-constexpr size_t kMaxLine = 65536;
+inline volatile long g_stopping = 0;         // set by stop(): threads must wind down
+inline CRITICAL_SECTION g_cs;                // guards g_socks / g_hthreads
+inline SOCKET g_socks[64];                   // open client sockets (closed by stop() to unblock recv)
+inline int    g_nsocks = 0;
+inline HANDLE g_hthreads[64];                // listener + client thread handles (stop() waits on the
+inline int    g_nthreads = 0;                // handles, not a counter: a thread is "gone" only once
+constexpr size_t kMaxLine = 65536;           // the OS says so — it still runs our epilogue after any flag)
+
+inline void track(SOCKET s, bool add) {
+    EnterCriticalSection(&g_cs);
+    if (add) { if (g_nsocks < 64) g_socks[g_nsocks++] = s; }
+    else for (int i = 0; i < g_nsocks; ++i) if (g_socks[i] == s) { g_socks[i] = g_socks[--g_nsocks]; break; }
+    LeaveCriticalSection(&g_cs);
+}
+// Remember a thread handle; drops signalled (finished) ones first so the table does not fill up.
+inline void track_thread(HANDLE h) {
+    EnterCriticalSection(&g_cs);
+    for (int i = 0; i < g_nthreads;)
+        if (WaitForSingleObject(g_hthreads[i], 0) == WAIT_OBJECT_0) { CloseHandle(g_hthreads[i]); g_hthreads[i] = g_hthreads[--g_nthreads]; }
+        else ++i;
+    if (g_nthreads < 64) g_hthreads[g_nthreads++] = h; else CloseHandle(h);
+    LeaveCriticalSection(&g_cs);
+}
 
 inline void send_all(SOCKET s, const char* p, size_t n) {
     while (n > 0) {
@@ -41,6 +63,7 @@ inline void send_all(SOCKET s, const char* p, size_t n) {
 inline DWORD WINAPI ClientThread(LPVOID arg) {
     SOCKET s = (SOCKET)(uintptr_t)arg;
     InterlockedIncrement(&g_clients);
+    track(s, true);
     std::string buf; char tmp[4096];
     bool sniffed = false;
     for (;;) {
@@ -66,9 +89,11 @@ inline DWORD WINAPI ClientThread(LPVOID arg) {
             std::string resp = g_handler ? g_handler(line) : std::string("{\"ok\":false,\"error\":\"no handler\"}");
             resp += '\n';
             send_all(s, resp.data(), resp.size());
+            if (g_stopping) break;      // e.g. the "unload" reply just went out
         }
-        if (buf.size() > kMaxLine) break;
+        if (buf.size() > kMaxLine || g_stopping) break;
     }
+    track(s, false);
     shutdown(s, SD_BOTH);
     closesocket(s);
     InterlockedDecrement(&g_clients);
@@ -78,11 +103,13 @@ inline DWORD WINAPI ClientThread(LPVOID arg) {
 inline DWORD WINAPI ListenThread(LPVOID) {
     for (;;) {
         SOCKET c = accept(g_listen, nullptr, nullptr);
+        if (g_stopping) { if (c != INVALID_SOCKET) closesocket(c); break; }
         if (c == INVALID_SOCKET) { Sleep(50); continue; }
         BOOL nd = TRUE; setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char*)&nd, sizeof nd);
         HANDLE t = CreateThread(nullptr, 0, ClientThread, (LPVOID)(uintptr_t)c, 0, nullptr);
-        if (t) CloseHandle(t); else closesocket(c);
+        if (t) track_thread(t); else closesocket(c);
     }
+    return 0;
 }
 
 // Start the listener on 127.0.0.1:port. Returns 0 on success or the WSA error code. Never throws;
@@ -90,6 +117,7 @@ inline DWORD WINAPI ListenThread(LPVOID) {
 // server instance).
 inline int start(int port, Handler h) {
     g_handler = h; g_port = port;
+    InitializeCriticalSection(&g_cs);
     WSADATA wsa;
     int e = WSAStartup(MAKEWORD(2, 2), &wsa);
     if (e) return e;
@@ -110,8 +138,28 @@ inline int start(int port, Handler h) {
     if (err) { closesocket(g_listen); g_listen = INVALID_SOCKET; return err; }
     if (listen(g_listen, 8) != 0) { err = WSAGetLastError(); closesocket(g_listen); g_listen = INVALID_SOCKET; return err; }
     HANDLE t = CreateThread(nullptr, 0, ListenThread, nullptr, 0, nullptr);
-    if (t) CloseHandle(t);
+    if (t) track_thread(t);
     return 0;
+}
+
+// Tear the control plane down: closes the listener and every client socket (which unblocks their
+// recv), then waits for all transport threads to exit — a hard requirement before the DLL can be
+// unmapped. Must NOT be called from a ClientThread (it would wait on itself); the unload path runs
+// it from a dedicated thread. Returns false if a thread did not exit within timeoutMs.
+inline bool stop(DWORD timeoutMs = 3000) {
+    InterlockedExchange(&g_stopping, 1);
+    if (g_listen != INVALID_SOCKET) { closesocket(g_listen); g_listen = INVALID_SOCKET; }
+    EnterCriticalSection(&g_cs);
+    for (int i = 0; i < g_nsocks; ++i) { shutdown(g_socks[i], SD_BOTH); closesocket(g_socks[i]); }
+    g_nsocks = 0;
+    HANDLE hs[64]; int n = g_nthreads;
+    for (int i = 0; i < n; ++i) hs[i] = g_hthreads[i];
+    g_nthreads = 0;
+    LeaveCriticalSection(&g_cs);
+    bool clean = n == 0 || WaitForMultipleObjects((DWORD)n, hs, TRUE, timeoutMs) < WAIT_OBJECT_0 + (DWORD)n;
+    for (int i = 0; i < n; ++i) CloseHandle(hs[i]);
+    if (clean) { DeleteCriticalSection(&g_cs); WSACleanup(); }
+    return clean;
 }
 
 } // namespace ipc
