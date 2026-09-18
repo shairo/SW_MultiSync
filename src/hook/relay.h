@@ -43,8 +43,8 @@ struct Cfg {
     double lagRatio    = 0.5;  // render lag as a fraction of the cadence interval (lag = interval × lagRatio)
     int    lagMin      = 0;    // floor on lag (ticks): near vehicles hold this minimum lag even when interval×ratio is smaller
     int    relayMinGap = 10;   // only relay when native gap exceeds this (else native is fine)
-    int    stale       = 30;   // don't relay if freshest source older than this (ticks)
-    double gapOutlier  = 30;   // reject velocity from a sample gap larger than this (ticks)
+    int    stale       = 300;   // don't relay if freshest source older than this (ticks)
+    double gapOutlier  = 0;    // reject velocity from a sample gap larger than this (ticks); <=0 = off
     int    maxPerSend  = 24;   // records appended to one message (clamped to kMaxPerSend)
     int    budgetWindow    = 60;   // per-recipient budget window (ticks ≈ 1s)
     int    capKbpsPerPeer  = 2000; // per-recipient relay bandwidth cap (kbit/s) — safety valve
@@ -78,7 +78,7 @@ inline const CfgField kCfgFields[] = {
     {"lagMin",          true,  &Cfg::lagMin,          nullptr, false, "minimum render lag (ticks)"},
     {"relayMinGap",     true,  &Cfg::relayMinGap,     nullptr, false, "relay only when native gap exceeds this (ticks)"},
     {"stale",           true,  &Cfg::stale,           nullptr, false, "skip if source older than this (ticks)"},
-    {"gapOutlier",      false, nullptr, &Cfg::gapOutlier,       false, "reject velocity from gaps larger than this (ticks)"},
+    {"gapOutlier",      false, nullptr, &Cfg::gapOutlier,       false, "reject velocity from gaps larger than this (ticks); 0 = off"},
     {"maxPerSend",      true,  &Cfg::maxPerSend,      nullptr, false, "max records appended per message (<=24)"},
     {"budgetWindow",    true,  &Cfg::budgetWindow,    nullptr, false, "bandwidth window (ticks)"},
     {"capKbpsPerPeer",  true,  &Cfg::capKbpsPerPeer,  nullptr, false, "per-peer relay bandwidth cap (kbit/s)"},
@@ -294,9 +294,18 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
     }
 }
 
+// Velocity confidence. Discontinuities (teleport / respawn) normally arrive as unload+reload, which
+// observe() handles by erasing the Veh (prevT resets, so no velocity spans the jump). gapOutlier is a
+// leftover absolute guard for a jump WITHOUT an unload; off by default since a distant-only source
+// legitimately samples at 80+ ticks and must still yield a velocity.
+inline bool has_velocity(const Veh& v) {
+    double dt = (double)v.curT - v.prevT;
+    return v.prevT != 0 && dt > 0 && (g_cfg.gapOutlier <= 0 || dt <= g_cfg.gapOutlier);
+}
+
 inline void predict(const Veh& v, uint32_t eta, double& ex, double& ey, double& ez) {
     double dt = (double)v.curT - v.prevT;
-    if (v.prevT != 0 && dt > 0 && dt <= g_cfg.gapOutlier) {
+    if (has_velocity(v)) {
         double ahead = (double)eta - v.curT;
         ex = v.cx + (v.cx - v.px) / dt * ahead;
         ey = v.cy + (v.cy - v.py) / dt * ahead;
@@ -310,7 +319,7 @@ inline void predict(const Veh& v, uint32_t eta, double& ex, double& ey, double& 
 // confidence cap as position; holds the latest quaternion when there is no confident angular velocity.
 inline void predict_quat(const Veh& v, uint32_t eta, float out[4]) {
     double dt = (double)v.curT - v.prevT;
-    if (v.prevT == 0 || dt <= 0 || dt > g_cfg.gapOutlier) { memcpy(out, v.cq, sizeof(float) * 4); return; }
+    if (!has_velocity(v)) { memcpy(out, v.cq, sizeof(float) * 4); return; }
     double dot = 0; for (int i = 0; i < 4; i++) dot += (double)v.cq[i] * v.pq[i];
     double s = dot < 0 ? -1.0 : 1.0;                        // flip prev into cur's hemisphere
     double ahead = (double)eta - v.curT, f = ahead / dt;
@@ -327,6 +336,7 @@ inline void predict_quat(const Veh& v, uint32_t eta, float out[4]) {
 inline bool managed(uint64_t peer, uint32_t V, uint32_t tick) {
     auto vit = g_veh.find(V);
     if (vit == g_veh.end() || !vit->second.has) return false;
+    if (!has_velocity(vit->second)) return false;   // a held pose re-sent is worse than native (stop-and-go)
     if (tick - vit->second.curT > (uint32_t)g_cfg.stale) return false;   // source dried up
     auto git = g_natGap.find(std::make_pair(peer, V));
     if (git == g_natGap.end() || git->second <= (uint32_t)g_cfg.relayMinGap) return false;  // unknown or close
