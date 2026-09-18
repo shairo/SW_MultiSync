@@ -22,6 +22,15 @@ struct Peer {
 };
 
 inline std::map<uint64_t, Peer> g_peers;
+// Liveness is inferred from traffic: the server sends every connected peer something every tick, so
+// silence means gone (a client-side disconnect message is not reliably observed). Consulted by
+// peers.get: silent > kSilentMs reports connected=false; silent > kExpireMs is evicted so a long
+// session with many joins does not grow the table (and the peers[] response) without bound.
+constexpr uint64_t kSilentMs = 5000, kExpireMs = 10 * 60 * 1000;
+inline void expire(uint64_t nowMs) {
+    for (auto it = g_peers.begin(); it != g_peers.end();)
+        if (nowMs - it->second.lastSeenMs > kExpireMs) it = g_peers.erase(it); else ++it;
+}
 inline uint64_t g_walkFailDumped = 0;     // walk-fail frames written to disk this session
 
 inline Peer& touch(uint64_t sid, uint64_t nowMs) {

@@ -43,6 +43,9 @@ static std::string g_dllVersion;
 struct Prev { double sendBytes = 0, injBytes = 0, recvBytes = 0; };
 static std::map<std::string, Prev> g_prevPeer; static Prev g_prevTotal; static double g_prevMs = 0;
 static double g_rateSend = 0, g_rateInj = 0;   // totals across peers, bytes/s
+// The DLL reports connected=false after 5 s of silence and evicts peers after 10 min (stats.h);
+// the GUI additionally hides rows silent for over 2 minutes to keep the table short.
+static const double kPeerDropSec = 120;
 
 // ---------------------------------------------------------------- controls
 enum {
@@ -50,13 +53,13 @@ enum {
     // header
     ID_SERVER_TXT, ID_DLL_TXT, ID_INJECT_BTN, ID_AUTO_CHK, ID_VERSION_TXT,
     // status tab
-    ID_RELAY_BTN, ID_TRAFFIC_TXT, ID_WALK_TXT, ID_PEERS_LV, ID_VEH_LV, ID_PEERS_LBL, ID_VEH_LBL,
+    ID_RELAY_BTN, ID_RELAY_NOTE, ID_TRAFFIC_TXT, ID_WALK_TXT, ID_PEERS_LV, ID_VEH_LV, ID_PEERS_LBL, ID_VEH_LBL,
     // settings tab
     ID_CFG_LV, ID_CFG_NAME, ID_CFG_EDIT, ID_CFG_APPLY, ID_CFG_HELP, ID_CFG_SAVE, ID_CFG_RELOAD, ID_CFG_NOTE,
     // startup tab (edits swhook.ini directly; no DLL needed)
-    ID_ST_NOTE, ID_ST_AUTO, ID_ST_DLL, ID_ST_PORT_LBL, ID_ST_PORT, ID_ST_RELAY, ID_ST_CAPTURE, ID_ST_SAVE, ID_ST_INI,
+    ID_ST_NOTE, ID_ST_DLL, ID_ST_PORT_LBL, ID_ST_PORT, ID_ST_RELAY, ID_ST_SAVE, ID_ST_INI,
     // log tab
-    ID_LOGPKT_CHK, ID_DUMPWF_CHK, ID_DUMPMAX_LBL, ID_DUMPMAX, ID_DUMPMAX_APPLY, ID_CAP_TXT, ID_CAP_START, ID_CAP_STOP, ID_CAP_MARK, ID_OPEN_DIR, ID_LOG_TXT, ID_LOG_NOTE,
+    ID_LOGPKT_CHK, ID_DUMPWF_CHK, ID_CAP_AUTO, ID_DUMPMAX_LBL, ID_DUMPMAX, ID_DUMPMAX_APPLY, ID_CAP_TXT, ID_CAP_START, ID_CAP_STOP, ID_CAP_MARK, ID_OPEN_DIR, ID_LOG_TXT, ID_LOG_NOTE,
 };
 static const int kTabs = 4;
 static std::vector<HWND> g_tabCtl[kTabs];    // controls per tab page
@@ -181,14 +184,23 @@ static void cfg_set(const std::string& key, double val) {
 // ---------------------------------------------------------------- startup tab (ini-backed)
 // The GUI reads swhook.ini itself for the startup-only keys: they matter before the DLL exists
 // (ipcPort tells us where to connect) and must be editable while the server is down.
+// Write one startup-only key straight to swhook.ini (these never go through the DLL: it reads them
+// once at injection). Re-reads the file first so nothing saved by another tool is clobbered.
+static void ini_set(const char* key, double val) {
+    relay::g_cfg = relay::Cfg();
+    relay::load_config_file(g_iniPath.c_str());
+    relay::set_cfg(key, val);
+    if (!relay::save_config_file(g_iniPath.c_str()))
+        MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWSyncTool", MB_ICONWARNING);
+}
 static void startup_load() {
     relay::g_cfg = relay::Cfg();
     relay::load_config_file(g_iniPath.c_str());
     if (!g_dllUp) g_port = relay::g_cfg.ipcPort;   // while connected, keep talking to the port the DLL actually uses
     g_autoInject = relay::g_cfg.autoInject != 0;
-    CheckDlgButton(g_wnd, ID_ST_AUTO, g_autoInject ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(g_wnd, ID_AUTO_CHK, g_autoInject ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_wnd, ID_ST_RELAY, relay::g_cfg.relay ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(g_wnd, ID_ST_CAPTURE, relay::g_cfg.capture ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(g_wnd, ID_CAP_AUTO, relay::g_cfg.capture ? BST_CHECKED : BST_UNCHECKED);
     SetWindowTextW(H(ID_ST_PORT), fmtw(L"%d", g_port).c_str());
     set(ID_ST_DLL, L"DLL: " + W(g_dllPath));
     set(ID_ST_INI, L"ini: " + W(g_iniPath));
@@ -199,9 +211,7 @@ static void startup_save() {
     relay::load_config_file(g_iniPath.c_str());
     wchar_t pw[16]; GetWindowTextW(H(ID_ST_PORT), pw, 16);
     relay::set_cfg("ipcPort", _wtoi(pw));
-    relay::set_cfg("autoInject", IsDlgButtonChecked(g_wnd, ID_ST_AUTO) == BST_CHECKED ? 1 : 0);
     relay::set_cfg("relay",      IsDlgButtonChecked(g_wnd, ID_ST_RELAY) == BST_CHECKED ? 1 : 0);
-    relay::set_cfg("capture",    IsDlgButtonChecked(g_wnd, ID_ST_CAPTURE) == BST_CHECKED ? 1 : 0);
     bool ok = relay::save_config_file(g_iniPath.c_str());
     if (!ok) { MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWSyncTool", MB_ICONWARNING); return; }
     bool portChanged = relay::g_cfg.ipcPort != g_port;
@@ -257,7 +267,9 @@ static void render_peers() {
         double vs = dt ? (sb - pv.sendBytes) / dt : 0, vi = dt ? (ib - pv.injBytes) / dt : 0, vr = dt ? (rb - pv.recvBytes) / dt : 0;
         pv = { sb, ib, rb }; totS += sb; totI += ib;
         double ago = (now - N(p, "lastSeenMs")) / 1000;
-        rows.push_back({ W(ids), B(p, "connected") ? L"接続中" : L"切断", bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
+        if (ago > kPeerDropSec) return;                      // long gone: hide (the DLL keeps the counters)
+        bool conn = B(p, "connected");
+        rows.push_back({ W(ids), conn ? L"接続中" : L"切断", bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
                          fmtw(L"%.1f%%", t8 ? 100.0 * wf / t8 : 0), fmtw(L"%.0f", N(p, "vehicles")), fmtw(L"%.0f 秒前", ago) });
     });
     if (dt) { g_rateSend = (totS - g_prevTotal.sendBytes) / dt; g_rateInj = (totI - g_prevTotal.injBytes) / dt; }
@@ -333,6 +345,7 @@ static void build_ui() {
     mk(L"STATIC", L"", 0, 12, 10, 300, 20, ID_SERVER_TXT);
     mk(L"STATIC", L"", 0, 12, 32, 460, 20, ID_DLL_TXT);
     mk(L"BUTTON", L"今すぐ注入", WS_TABSTOP | BS_PUSHBUTTON, 480, 10, 110, 26, ID_INJECT_BTN);
+    mk(L"BUTTON", L"サーバー起動を検出したら自動で注入", WS_TABSTOP | BS_AUTOCHECKBOX, 600, 12, 300, 22, ID_AUTO_CHK);
     mk(L"STATIC", L"", SS_RIGHT, 600, 34, 300, 20, ID_VERSION_TXT);
 
     g_tab = mk(L"SysTabControl32", L"", WS_TABSTOP | WS_CLIPSIBLINGS, 12, 60, 888, 560, ID_TAB);
@@ -342,11 +355,12 @@ static void build_ui() {
 
     // --- status tab
     HWND rb = mk(L"BUTTON", L"", WS_TABSTOP | BS_PUSHBUTTON, X, Y, 300, 40, ID_RELAY_BTN, 0);
+    mk(L"STATIC", L"※ 一度注入すればこの画面を閉じても効き続けます（サーバーを終了するまで）", 0, X, Y + 44, 400, 18, ID_RELAY_NOTE, 0);
     SendMessageW(rb, WM_SETFONT, (WPARAM)g_fontBig, TRUE);
     mk(L"STATIC", L"", 0, X + 316, Y + 2, WID - 316, 18, ID_TRAFFIC_TXT, 0);
     mk(L"STATIC", L"", 0, X + 316, Y + 22, WID - 316, 18, ID_WALK_TXT, 0);
-    mk(L"STATIC", L"参加プレイヤー", 0, X, Y + 52, 400, 18, ID_PEERS_LBL, 0);
-    HWND pl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 72, WID, 190, ID_PEERS_LV, 0, WS_EX_CLIENTEDGE);
+    mk(L"STATIC", L"参加プレイヤー", 0, X, Y + 66, 400, 18, ID_PEERS_LBL, 0);
+    HWND pl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 86, WID, 176, ID_PEERS_LV, 0, WS_EX_CLIENTEDGE);
     lv_cols(pl, { {L"SteamID", 150}, {L"状態", 60}, {L"送信/s", 90}, {L"同期追加/s", 90}, {L"受信/s", 90}, {L"解析率", 70}, {L"車両", 50}, {L"最終通信", 90} });
     mk(L"STATIC", L"車両", 0, X, Y + 272, 600, 18, ID_VEH_LBL, 0);
     HWND vl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 292, WID, 220, ID_VEH_LV, 0, WS_EX_CLIENTEDGE);
@@ -366,14 +380,12 @@ static void build_ui() {
 
     // --- startup tab (swhook.ini, read/written by the GUI itself)
     mk(L"STATIC", L"ここは swhook.ini の起動時設定です。サーバー稼働中に変えても効かず、次に注入したときから有効になります。", 0, X, Y, WID, 18, ID_ST_NOTE, 2);
-    mk(L"BUTTON", L"server64.exe の起動を検出したら自動で注入する (autoInject)", WS_TABSTOP | BS_AUTOCHECKBOX, X, Y + 30, WID, 22, ID_ST_AUTO, 2);
-    mk(L"BUTTON", L"注入した時点で同期改善を ON にする (relay)", WS_TABSTOP | BS_AUTOCHECKBOX, X, Y + 56, WID, 22, ID_ST_RELAY, 2);
-    mk(L"BUTTON", L"注入した時点で録画 (.swcap) を開始する (capture)", WS_TABSTOP | BS_AUTOCHECKBOX, X, Y + 82, WID, 22, ID_ST_CAPTURE, 2);
-    mk(L"STATIC", L"制御ポート (ipcPort) 127.0.0.1:", 0, X, Y + 116, 220, 22, ID_ST_PORT_LBL, 2);
-    mk(L"EDIT", L"", WS_TABSTOP | ES_NUMBER, X + 226, Y + 113, 90, 24, ID_ST_PORT, 2, WS_EX_CLIENTEDGE);
-    mk(L"BUTTON", L"iniに保存", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 150, 110, 26, ID_ST_SAVE, 2);
-    mk(L"STATIC", L"", 0, X, Y + 190, WID, 18, ID_ST_DLL, 2);
-    mk(L"STATIC", L"", 0, X, Y + 210, WID, 18, ID_ST_INI, 2);
+    mk(L"BUTTON", L"注入した時点で同期改善を ON にする (relay)", WS_TABSTOP | BS_AUTOCHECKBOX, X, Y + 30, WID, 22, ID_ST_RELAY, 2);
+    mk(L"STATIC", L"制御ポート (ipcPort) 127.0.0.1:", 0, X, Y + 64, 220, 22, ID_ST_PORT_LBL, 2);
+    mk(L"EDIT", L"", WS_TABSTOP | ES_NUMBER, X + 226, Y + 61, 90, 24, ID_ST_PORT, 2, WS_EX_CLIENTEDGE);
+    mk(L"BUTTON", L"iniに保存", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 98, 110, 26, ID_ST_SAVE, 2);
+    mk(L"STATIC", L"", 0, X, Y + 138, WID, 18, ID_ST_DLL, 2);
+    mk(L"STATIC", L"", 0, X, Y + 158, WID, 18, ID_ST_INI, 2);
 
     // --- log tab
     mk(L"BUTTON", L"ログファイルを書く (log) — captures\\session_<日時>.log。起動・設定変更・同期統計などのイベントを記録", WS_TABSTOP | BS_AUTOCHECKBOX, X, Y, WID, 22, ID_LOGPKT_CHK, 3);
@@ -381,14 +393,15 @@ static void build_ui() {
     mk(L"STATIC", L"　　1セッションあたりの保存上限 (dumpWalkFailMax):", 0, X, Y + 52, 330, 22, ID_DUMPMAX_LBL, 3);
     mk(L"EDIT", L"", WS_TABSTOP | ES_NUMBER, X + 336, Y + 49, 80, 24, ID_DUMPMAX, 3, WS_EX_CLIENTEDGE);
     mk(L"BUTTON", L"適用", WS_TABSTOP | BS_PUSHBUTTON, X + 424, Y + 48, 70, 26, ID_DUMPMAX_APPLY, 3);
-    mk(L"STATIC", L"", 0, X, Y + 92, WID, 18, ID_CAP_TXT, 3);
-    mk(L"BUTTON", L"録画開始（新規ファイル）", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 116, 180, 26, ID_CAP_START, 3);
-    mk(L"BUTTON", L"録画停止", WS_TABSTOP | BS_PUSHBUTTON, X + 190, Y + 116, 100, 26, ID_CAP_STOP, 3);
-    mk(L"BUTTON", L"マーカーを打つ", WS_TABSTOP | BS_PUSHBUTTON, X + 300, Y + 116, 120, 26, ID_CAP_MARK, 3);
-    mk(L"STATIC", L"", 0, X, Y + 154, WID, 18, ID_LOG_TXT, 3);
-    mk(L"BUTTON", L"captures フォルダを開く", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 178, 180, 26, ID_OPEN_DIR, 3);
+    mk(L"BUTTON", L"注入した時点で録画 (.swcap) を開始する (capture) — 通常は OFF。調査依頼時のみ", WS_TABSTOP | BS_AUTOCHECKBOX, X, Y + 92, WID, 22, ID_CAP_AUTO, 3);
+    mk(L"STATIC", L"", 0, X, Y + 122, WID, 18, ID_CAP_TXT, 3);
+    mk(L"BUTTON", L"録画開始（新規ファイル）", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 146, 180, 26, ID_CAP_START, 3);
+    mk(L"BUTTON", L"録画停止", WS_TABSTOP | BS_PUSHBUTTON, X + 190, Y + 146, 100, 26, ID_CAP_STOP, 3);
+    mk(L"BUTTON", L"マーカーを打つ", WS_TABSTOP | BS_PUSHBUTTON, X + 300, Y + 146, 120, 26, ID_CAP_MARK, 3);
+    mk(L"STATIC", L"", 0, X, Y + 184, WID, 18, ID_LOG_TXT, 3);
+    mk(L"BUTTON", L"captures フォルダを開く", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 208, 180, 26, ID_OPEN_DIR, 3);
     mk(L"STATIC", L"上のログ設定は稼働中すぐ効き、「設定」タブの「iniに保存」で次回以降にも残ります。不具合報告のときは captures フォルダ内の .log（と必要なら .swcap）を送ってください。",
-       0, X, Y + 218, WID, 36, ID_LOG_NOTE, 3);
+       0, X, Y + 248, WID, 36, ID_LOG_NOTE, 3);
     show_tab(0);
 }
 
@@ -409,7 +422,8 @@ static void on_command(int id) {
     case ID_CFG_SAVE: { std::string r = ipc("config.save");
         MessageBoxW(g_wnd, ipc_ok(r) ? (L"保存しました:\n" + W(Sx(r.c_str(), "path"))).c_str() : L"保存に失敗しました。", L"SWSyncTool", ipc_ok(r) ? MB_ICONINFORMATION : MB_ICONWARNING); break; }
     case ID_CFG_RELOAD: ipc("config.reload"); refresh_config(); break;
-    case ID_ST_AUTO: g_autoInject = IsDlgButtonChecked(g_wnd, ID_ST_AUTO) == BST_CHECKED; break;
+    case ID_AUTO_CHK: g_autoInject = IsDlgButtonChecked(g_wnd, ID_AUTO_CHK) == BST_CHECKED; ini_set("autoInject", g_autoInject ? 1 : 0); break;
+    case ID_CAP_AUTO: ini_set("capture", IsDlgButtonChecked(g_wnd, ID_CAP_AUTO) == BST_CHECKED ? 1 : 0); break;
     case ID_ST_SAVE: startup_save(); break;
     case ID_LOGPKT_CHK: cfg_set("log", IsDlgButtonChecked(g_wnd, ID_LOGPKT_CHK) == BST_CHECKED ? 1 : 0); break;
     case ID_DUMPMAX_APPLY: { wchar_t v[16]; GetWindowTextW(H(ID_DUMPMAX), v, 16); if (v[0]) cfg_set("dumpWalkFailMax", _wtof(v)); break; }

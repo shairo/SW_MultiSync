@@ -50,7 +50,8 @@ captureBytes logFile walkFailFile ipcPort ipcClients ipcRequests peerCount vehic
 `steamId connected firstSeenMs lastSeenMs lastTick sendCount sendBytes recvCount recvBytes
 injSends injBytes injRecords type8 walkFull walkPartial vehicles`
 `sendBytes` = what the game itself sent this peer (native); `injBytes` = extra bytes we added on
-top. `connected` clears on the ch15 close byte and sets again on any later traffic.
+top. `connected` is false after the ch15 close byte or 5 s without any traffic to that peer; peers silent
+for over 10 minutes are dropped from the list (and from the DLL's table). Counters are per DLL lifetime.
 
 ### vehicles[] entry
 `id tick pos[3] rot[4] vel[3]|null feeds[{steamId,gap}]`

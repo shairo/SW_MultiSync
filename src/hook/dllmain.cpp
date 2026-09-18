@@ -365,11 +365,14 @@ static void write_status(json::JsonW& w) {
     w.kv("seq", g_seq).kv("marks", g_markCount);
 }
 static void write_peers(json::JsonW& w) {
+    uint64_t now = GetTickCount64();
+    stats::expire(now);
     w.key("peers").arr();
     for (auto& kv : stats::g_peers) {
         const stats::Peer& p = kv.second;
         int vehs = 0; for (auto& g : relay::g_natGap) if (g.first.first == kv.first) vehs++;
-        w.obj().kv("steamId", kv.first).kvb("connected", p.connected)
+        bool connected = p.connected && now - p.lastSeenMs <= stats::kSilentMs;
+        w.obj().kv("steamId", kv.first).kvb("connected", connected)
          .kv("firstSeenMs", p.firstSeenMs).kv("lastSeenMs", p.lastSeenMs).kv("lastTick", p.lastTick)
          .kv("sendCount", p.sendCount).kv("sendBytes", p.sendBytes)
          .kv("recvCount", p.recvCount).kv("recvBytes", p.recvBytes)
