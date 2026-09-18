@@ -56,10 +56,32 @@ one vtable slot and log a buffer.
 ## Layout
 
 - `src/hook/` — the injected DLL (`swhook.dll`): DllMain, interface-pointer acquisition, vtable
-  swap, SendMessageToUser thunk, logging.
-- `src/inject/` — a tiny CLI injector (`inject.exe`): opens `server64.exe`, LoadLibrary our DLL
-  via CreateRemoteThread. Kept separate and dumb.
-- `build.bat` — builds both.
+  swap, SendMessageToUser thunk, logging, `relay.h` (stage-C relay + `Cfg` table), `stats.h`
+  (per-peer counters), `ipc.h` (control-plane transport).
+- `src/common/` — `version.h` (single version string) and `json.h` (dependency-free writer +
+  flat reader), shared by the DLL and the C++ clients.
+- `src/inject/` — `injector.h` (shared LoadLibrary-via-CreateRemoteThread core) and the tiny
+  `inject.exe` wrapper around it.
+- `src/swctl/` — `swctl.exe`, the CLI client: inject, status/peers/vehicles/watch, relay, capture,
+  config. Reference implementation of `src/common/ipc_client.h`.
+- `src/gui/` — `SWSyncTool.exe`, the Win32 GUI (no deps, requireAdministrator manifest): watches
+  for server64.exe, auto-injects, then polls the DLL over IPC. Startup-only keys (`relay`,
+  `capture`, `ipcPort`, `autoInject`) are edited on its startup tab by reading/writing swhook.ini
+  directly via `relay.h`; everything else goes through IPC.
+- `build.bat` — builds DLL, inject.exe, swctl.exe, SWSyncTool.exe.
+- `package.bat` — build + stage `dist\SW_SyncTool_v<ver>\` + zip. Ships GUI, CLI, DLL, ini (with
+  `relay=1` forced), `packaging/README_*.txt`, `ipc-protocol.md`. Version = `src/common/version.h`.
+  Keep .bat files ASCII-only (cmd parses them in the OEM codepage).
+
+## Control plane (since 0.2 — no hotkeys)
+
+All runtime control goes through **127.0.0.1:`ipcPort`** (JSON lines, see `ipc-protocol.md`):
+relay on/off, capture start/stop/mark, config get/set/reload/save, stats, peers, vehicles,
+version. The GUI, the CLI and any third-party tool use the same commands — never add a control
+path that bypasses it. Config knobs are table-driven (`relay::kCfgFields`): adding one = a struct
+member + one table row, and ini load/save + IPC pick it up automatically. The DLL exposes
+cumulative counters only; clients compute rates. To test the IPC without the game, LoadLibrary the
+DLL from any process: the listener comes up before the Steam wait.
 
 ## Status
 

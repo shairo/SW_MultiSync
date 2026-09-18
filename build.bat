@@ -12,7 +12,7 @@ echo === swhook.dll ===
 cl /nologo /std:c++17 /O2 /LD /EHsc /W3 ^
    /Fe:"%OUT%\swhook.dll" /Fo:"%OUT%\\" ^
    "%ROOT%src\hook\dllmain.cpp" ^
-   /link kernel32.lib user32.lib
+   /link kernel32.lib user32.lib ws2_32.lib
 if errorlevel 1 exit /b 1
 
 echo === inject.exe ===
@@ -20,6 +20,21 @@ cl /nologo /std:c++17 /O2 /EHsc /W3 ^
    /Fe:"%OUT%\inject.exe" /Fo:"%OUT%\\" ^
    "%ROOT%src\inject\inject.cpp" ^
    /link kernel32.lib
+if errorlevel 1 exit /b 1
+
+echo === swctl.exe ===
+cl /nologo /std:c++17 /O2 /EHsc /W3 ^
+   /Fe:"%OUT%\swctl.exe" /Fo:"%OUT%\\" ^
+   "%ROOT%src\swctl\swctl.cpp" ^
+   /link kernel32.lib advapi32.lib ws2_32.lib
+if errorlevel 1 exit /b 1
+
+echo === SWSyncTool.exe (GUI) ===
+cl /nologo /std:c++17 /O2 /EHsc /W3 /utf-8 ^
+   /Fe:"%OUT%\SWSyncTool.exe" /Fo:"%OUT%\\" ^
+   "%ROOT%src\gui\gui.cpp" ^
+   /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTUAC:"level='requireAdministrator' uiAccess='false'" ^
+   kernel32.lib user32.lib gdi32.lib comctl32.lib shell32.lib advapi32.lib ws2_32.lib
 if errorlevel 1 exit /b 1
 
 copy /y "%OUT%\swhook.dll" "%OUT%\..\swhook.dll" >nul

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <string>
 #include <cmath>
 #include <map>
 #include <vector>
@@ -47,32 +48,83 @@ struct Cfg {
     int    maxPerSend  = 24;   // records appended to one message (clamped to kMaxPerSend)
     int    budgetWindow    = 60;   // per-recipient budget window (ticks ≈ 1s)
     int    capKbpsPerPeer  = 2000; // per-recipient relay bandwidth cap (kbit/s) — safety valve
-    // startup behaviour (read once at init by the DLL, not on F5 reload)
-    int    relay   = 0;   // 1 = auto-enable relay injection at startup (no F6 needed)
-    int    hotkeys = 1;   // 0 = disable ALL key polling (no F5/F6/F7/F8/F9/F10) — hands-off mode
-    int    capture = 1;   // 1 = auto-start .swcap capture at startup (0 = no capture files)
+    // startup behaviour (read once at init by the DLL; a later config.reload does not re-apply them)
+    int    relay   = 0;   // 1 = auto-enable relay injection at startup
+    int    capture = 0;   // 1 = auto-start .swcap capture at startup (default off: capture is for diagnosis)
+    int    ipcPort = 28215; // localhost TCP port of the control-plane (GUI/CLI/other tools)
+    int    autoInject = 1; // GUI only: inject as soon as server64.exe appears (the DLL ignores this key)
+    // logging (hot-reloadable)
+    int    log          = 1;   // 1 = write the session .log (event lines: startup, config, relay stats, hook status)
+    int    dumpWalkFail = 0;   // 1 = record every type=8 frame the walker could not fully decode (walkfail_*.swcap)
+    int    dumpWalkFailMax = 200; // cap on walk-fail frames per session (disk safety)
 };
 inline Cfg g_cfg;
 
-// Apply one "key value" pair to g_cfg. Returns true if the key was recognized. Unknown keys are
-// ignored by the caller (logged). Values that size buffers are clamped to their compile-time max.
+// Field table: the single list every config feature is driven from (ini load/save, IPC config.get /
+// config.set, the startup log). Add a knob = add a struct member + one row here.
+struct CfgField {
+    const char* name;
+    bool   isInt;
+    int    Cfg::*ip;
+    double Cfg::*dp;
+    bool   startupOnly;   // applied only at DLL init (reload/set changes the value but not behaviour until restart)
+    const char* help;
+};
+inline const CfgField kCfgFields[] = {
+    {"intervalMin",     true,  &Cfg::intervalMin,     nullptr, false, "finest relay cadence (ticks)"},
+    {"intervalMax",     true,  &Cfg::intervalMax,     nullptr, false, "coarsest relay cadence (ticks)"},
+    {"lodDenser",       true,  &Cfg::lodDenser,       nullptr, false, "relay this many x denser than native cadence"},
+    {"lagRatio",        false, nullptr, &Cfg::lagRatio,         false, "render lag as fraction of interval"},
+    {"lagMin",          true,  &Cfg::lagMin,          nullptr, false, "minimum render lag (ticks)"},
+    {"relayMinGap",     true,  &Cfg::relayMinGap,     nullptr, false, "relay only when native gap exceeds this (ticks)"},
+    {"stale",           true,  &Cfg::stale,           nullptr, false, "skip if source older than this (ticks)"},
+    {"gapOutlier",      false, nullptr, &Cfg::gapOutlier,       false, "reject velocity from gaps larger than this (ticks)"},
+    {"maxPerSend",      true,  &Cfg::maxPerSend,      nullptr, false, "max records appended per message (<=24)"},
+    {"budgetWindow",    true,  &Cfg::budgetWindow,    nullptr, false, "bandwidth window (ticks)"},
+    {"capKbpsPerPeer",  true,  &Cfg::capKbpsPerPeer,  nullptr, false, "per-peer relay bandwidth cap (kbit/s)"},
+    {"relay",           true,  &Cfg::relay,           nullptr, true,  "1 = relay ON at startup"},
+    {"capture",         true,  &Cfg::capture,         nullptr, true,  "1 = start .swcap capture at startup"},
+    {"ipcPort",         true,  &Cfg::ipcPort,         nullptr, true,  "control-plane TCP port (127.0.0.1)"},
+    {"autoInject",      true,  &Cfg::autoInject,      nullptr, true,  "GUI: 1 = inject automatically when server64.exe starts"},
+    {"log",             true,  &Cfg::log,             nullptr, false, "1 = write the session .log file"},
+    {"dumpWalkFail",    true,  &Cfg::dumpWalkFail,    nullptr, false, "1 = record undecodable type=8 frames to walkfail_*.swcap"},
+    {"dumpWalkFailMax", true,  &Cfg::dumpWalkFailMax, nullptr, false, "max walk-fail frames per session"},
+};
+constexpr int kCfgFieldCount = (int)(sizeof(kCfgFields) / sizeof(kCfgFields[0]));
+
+inline const CfgField* find_field(const char* k) {
+    for (const CfgField& f : kCfgFields) if (!strcmp(f.name, k)) return &f;
+    return nullptr;
+}
+inline double get_cfg(const CfgField& f) { return f.isInt ? (double)(g_cfg.*f.ip) : g_cfg.*f.dp; }
+inline bool   get_cfg(const char* k, double& v) { const CfgField* f = find_field(k); if (!f) return false; v = get_cfg(*f); return true; }
+
+// Apply one "key value" pair to g_cfg. Returns true if the key was recognized. Values that size
+// buffers or must be sane are clamped here (the only place clamps live).
 inline bool set_cfg(const char* k, double v) {
     auto ci = [](double x){ return (int)(x + 0.5); };
-    if      (!strcmp(k, "intervalMin"))    g_cfg.intervalMin = ci(v);
-    else if (!strcmp(k, "intervalMax"))    g_cfg.intervalMax = ci(v);
-    else if (!strcmp(k, "lodDenser"))      g_cfg.lodDenser = ci(v) < 1 ? 1 : ci(v);
-    else if (!strcmp(k, "lagRatio"))       g_cfg.lagRatio = v < 0 ? 0 : v;
-    else if (!strcmp(k, "lagMin"))         g_cfg.lagMin = ci(v) < 0 ? 0 : ci(v);
-    else if (!strcmp(k, "relayMinGap"))    g_cfg.relayMinGap = ci(v);
-    else if (!strcmp(k, "stale"))          g_cfg.stale = ci(v);
-    else if (!strcmp(k, "gapOutlier"))     g_cfg.gapOutlier = v;
-    else if (!strcmp(k, "maxPerSend"))     g_cfg.maxPerSend = ci(v) > kMaxPerSend ? kMaxPerSend : (ci(v) < 1 ? 1 : ci(v));
-    else if (!strcmp(k, "budgetWindow"))   g_cfg.budgetWindow = ci(v) < 1 ? 1 : ci(v);
-    else if (!strcmp(k, "capKbpsPerPeer")) g_cfg.capKbpsPerPeer = ci(v);
-    else if (!strcmp(k, "relay"))          g_cfg.relay = ci(v) ? 1 : 0;
-    else if (!strcmp(k, "hotkeys"))        g_cfg.hotkeys = ci(v) ? 1 : 0;
-    else if (!strcmp(k, "capture"))        g_cfg.capture = ci(v) ? 1 : 0;
-    else return false;
+    const CfgField* f = find_field(k);
+    if (!f) {
+        if (!strcmp(k, "hotkeys")) return true;   // removed in 0.2: accepted and ignored for old ini files
+        return false;
+    }
+    if (f->isInt) g_cfg.*f->ip = ci(v); else g_cfg.*f->dp = v;
+    // clamps
+    if (g_cfg.lodDenser < 1) g_cfg.lodDenser = 1;
+    if (g_cfg.lagRatio < 0) g_cfg.lagRatio = 0;
+    if (g_cfg.lagMin < 0) g_cfg.lagMin = 0;
+    if (g_cfg.maxPerSend > kMaxPerSend) g_cfg.maxPerSend = kMaxPerSend;
+    if (g_cfg.maxPerSend < 1) g_cfg.maxPerSend = 1;
+    if (g_cfg.budgetWindow < 1) g_cfg.budgetWindow = 1;
+    if (g_cfg.intervalMin < 1) g_cfg.intervalMin = 1;
+    if (g_cfg.intervalMax < g_cfg.intervalMin) g_cfg.intervalMax = g_cfg.intervalMin;
+    if (g_cfg.relay)   g_cfg.relay = 1;
+    if (g_cfg.capture) g_cfg.capture = 1;
+    if (g_cfg.ipcPort < 1 || g_cfg.ipcPort > 65535) g_cfg.ipcPort = 28215;
+    if (g_cfg.autoInject) g_cfg.autoInject = 1;
+    if (g_cfg.log) g_cfg.log = 1;
+    if (g_cfg.dumpWalkFail) g_cfg.dumpWalkFail = 1;
+    if (g_cfg.dumpWalkFailMax < 0) g_cfg.dumpWalkFailMax = 0;
     return true;
 }
 
@@ -99,6 +151,64 @@ inline int load_config_file(const char* path) {
     return applied;
 }
 
+// Format a config value the way the ini expects it (ints plain, doubles via %g).
+inline void fmt_cfg(const CfgField& f, char* out, size_t n) {
+    if (f.isInt) snprintf(out, n, "%d", g_cfg.*f.ip);
+    else         snprintf(out, n, "%g", g_cfg.*f.dp);
+}
+
+// Write g_cfg back to `path`, preserving the file's comments and layout: every existing "key = value"
+// line whose key we know gets its value rewritten in place (trailing comment kept); keys absent from
+// the file are appended at the end. Written via a temp file + rename so a crash never truncates the
+// ini. Returns true on success.
+inline bool save_config_file(const char* path) {
+    std::vector<std::string> out;
+    bool seen[kCfgFieldCount] = {false};
+    FILE* f = fopen(path, "rb");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            std::string L(line);
+            while (!L.empty() && (L.back() == '\n' || L.back() == '\r')) L.pop_back();
+            const char* p = line; while (*p == ' ' || *p == '\t') p++;
+            char key[64] = {0};
+            bool comment = (*p == '#' || *p == ';' || *p == 0 || *p == '\r' || *p == '\n');
+            if (!comment && sscanf(p, "%63[^=# \t]", key) == 1) {
+                const CfgField* fd = find_field(key);
+                if (fd) {
+                    int idx = (int)(fd - kCfgFields); seen[idx] = true;
+                    // keep everything from the first '#' (trailing comment) on this line
+                    size_t hash = L.find('#');
+                    std::string tail = hash == std::string::npos ? "" : L.substr(hash);
+                    char val[64]; fmt_cfg(*fd, val, sizeof val);
+                    // pad to the original comment column when possible for a tidy file
+                    std::string head = std::string(fd->name) + " = " + val;
+                    if (!tail.empty()) { while (head.size() < hash) head += ' '; if (head.back() != ' ') head += ' '; }
+                    L = head + tail;
+                }
+            }
+            out.push_back(L);
+        }
+        fclose(f);
+    }
+    bool anyMissing = false;
+    for (int i = 0; i < kCfgFieldCount; i++) if (!seen[i]) anyMissing = true;
+    if (anyMissing) {
+        if (!out.empty() && !out.back().empty()) out.push_back("");
+        out.push_back("# --- added by swhook (config.save) ---");
+        for (int i = 0; i < kCfgFieldCount; i++) if (!seen[i]) {
+            char val[64]; fmt_cfg(kCfgFields[i], val, sizeof val);
+            out.push_back(std::string(kCfgFields[i].name) + " = " + val + "   # " + kCfgFields[i].help);
+        }
+    }
+    std::string tmp = std::string(path) + ".tmp";
+    FILE* w = fopen(tmp.c_str(), "wb");
+    if (!w) return false;
+    for (const std::string& L : out) { fputs(L.c_str(), w); fputs("\r\n", w); }
+    fclose(w);
+    remove(path);
+    return rename(tmp.c_str(), path) == 0;
+}
 // interval (I) and lag (Λ) for a vehicle whose native sync gap is `gap`.
 // interval = clamp(gap/lodDenser, intervalMin, intervalMax). lag = clamp(interval×lagRatio, lagMin,
 // interval): scale the render lag to the cadence via lagRatio (default 0.5 = the classic interval/2),

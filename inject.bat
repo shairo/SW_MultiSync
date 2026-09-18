@@ -50,7 +50,7 @@ rem swhook.dll at repo root => swhook.ini / captures/ / .log all land in the rep
 if errorlevel 1 goto :err
 
 echo.
-echo injected. hotkeys: F5=reload ini  F6=relay  F7=mutate  F8=mark  F9=new capture  F10=stop capture
+echo injected. control: swctl.exe / GUI over 127.0.0.1:ipcPort (see swhook.ini)
 echo log/captures: %~dp0
 exit /b 0
 
