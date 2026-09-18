@@ -31,6 +31,10 @@ static int  S(int v) { return (int)(v * g_s + 0.5); }
 static ipcc::Client g_c;
 static int  g_port = 28215;
 static bool g_autoInject = true;
+// Auto-inject fires at most once per server process: after we (or anyone) got the DLL into a pid,
+// its disappearance means a deliberate `swctl unload` (dev hot-swap) and must not be undone by
+// the next poll — that would re-inject the stale DLL and lock the file against the rebuild.
+static DWORD g_injectedPid = 0;
 static std::string g_iniPath;
 static std::string g_dllPath;
 static std::wstring g_lastErr;
@@ -312,10 +316,11 @@ static void render_log() {
 // ---------------------------------------------------------------- polling
 static void poll() {
     DWORD pid = injector::find_pid("server64.exe");
-    if (pid && g_autoInject && !injector::has_module(pid, "swhook.dll")) {
+    if (pid && injector::has_module(pid, "swhook.dll")) g_injectedPid = pid;   // however it got there
+    else if (pid && g_autoInject && pid != g_injectedPid) {
         std::string err;
-        injector::inject(pid, g_dllPath.c_str(), err);     // result shows up via the status line
-        if (!err.empty()) g_lastErr = W(err);
+        if (injector::inject(pid, g_dllPath.c_str(), err) != injector::Failed) g_injectedPid = pid;
+        if (!err.empty()) g_lastErr = W(err);                // result shows up via the status line
     }
     if (!pid) { g_c.close(); g_port = relay::g_cfg.ipcPort; }   // server gone: next DLL will use the ini's port
     std::string st = pid ? ipc("status") : "";
