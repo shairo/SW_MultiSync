@@ -43,6 +43,7 @@ static std::wstring g_lastErr;
 static std::string g_status, g_peersJson, g_vehJson, g_cfgJson;
 static bool g_dllUp = false, g_hooked = false, g_relay = false, g_capturing = false;
 static bool g_showVeh = false;      // vehicle table is a debug aid (can be hundreds of rows): off unless toggled
+static std::wstring g_lastCap;      // most recent capture file path: stays shown after stop so it can be copied
 static std::string g_dllVersion;
 // rate computation: previous cumulative counters
 struct Prev { double sendBytes = 0, injBytes = 0, recvBytes = 0; };
@@ -64,7 +65,7 @@ enum {
     // startup tab (edits swhook.ini directly; no DLL needed)
     ID_ST_NOTE, ID_ST_DLL, ID_ST_PORT_LBL, ID_ST_PORT, ID_ST_RELAY, ID_ST_SAVE, ID_ST_INI,
     // log tab
-    ID_LOGPKT_CHK, ID_DUMPWF_CHK, ID_CAP_AUTO, ID_DUMPMAX_LBL, ID_DUMPMAX, ID_DUMPMAX_APPLY, ID_CAP_TXT, ID_CAP_START, ID_CAP_STOP, ID_CAP_MARK, ID_OPEN_DIR, ID_LOG_TXT, ID_LOG_NOTE,
+    ID_LOGPKT_CHK, ID_DUMPWF_CHK, ID_CAP_AUTO, ID_DUMPMAX_LBL, ID_DUMPMAX, ID_DUMPMAX_APPLY, ID_CAP_TXT, ID_CAP_START, ID_CAP_STOP, ID_CAP_MARK, ID_CAP_COPY, ID_OPEN_DIR, ID_LOG_TXT, ID_LOG_NOTE,
 };
 static const int kTabs = 4;
 static std::vector<HWND> g_tabCtl[kTabs];    // controls per tab page
@@ -290,7 +291,8 @@ static void render_vehicles() {
     json::for_each_elem(json::find_value(o, "vehicles"), [&](const char* v) {
         double pos[3] = {0,0,0};
         json::arr_nums(json::find_value(v, "pos"), pos, 3);
-        double sg = N(v, "srcGap");
+        double sg = N(v, "srcGap"), grp;
+        bool hasGrp = json::get_num(v, "group", grp);
         std::wstring feeds; int nf = 0; double minGap = 1e9;
         json::for_each_elem(json::find_value(v, "feeds"), [&](const char* f) {
             uint64_t id = 0; json::get_u64(f, "steamId", id); double g = N(f, "gap");
@@ -298,19 +300,32 @@ static void render_vehicles() {
             if (!feeds.empty()) feeds += L", ";
             feeds += fmtw(L"%llu:%.0f", (unsigned long long)id, g);
         });
-        rows.push_back({ fmtw(L"%.0f", N(v, "id")), fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]),
+        rows.push_back({ fmtw(L"%.0f", N(v, "id")), hasGrp ? fmtw(L"%.0f", grp) : L"不明", fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]),
                          sg > 0 ? fmtw(L"%.0f", sg) : L"-", fmtw(L"%d", nf), feeds });
     });
     lv_fill(H(ID_VEH_LV), rows);
-    set(ID_VEH_LBL, fmtw(L"車両 (%d)  — I_src: 最密な更新間隔tick / 受信者: SteamID:間隔tick（小さいほど近い）", (int)rows.size()));
+    set(ID_VEH_LBL, fmtw(L"車両 (%d)  — グループ: 注入前スポーンは不明 / I_src: 最密な更新間隔tick / 受信者: SteamID:間隔tick", (int)rows.size()));
 }
 
 static void render_log() {
-    if (!g_dllUp) { set(ID_CAP_TXT, L"録画: —（注入後に操作できます）"); set(ID_LOG_TXT, L""); EnableWindow(H(ID_CAP_START), false); EnableWindow(H(ID_CAP_STOP), false); EnableWindow(H(ID_CAP_MARK), false); return; }
+    EnableWindow(H(ID_CAP_COPY), !g_lastCap.empty());
+    if (!g_dllUp) {
+        set(ID_CAP_TXT, g_lastCap.empty() ? L"録画: —（注入後に操作できます）" : L"録画: —（最後のファイル: " + g_lastCap + L"）");
+        set(ID_LOG_TXT, L""); EnableWindow(H(ID_CAP_START), false); EnableWindow(H(ID_CAP_STOP), false); EnableWindow(H(ID_CAP_MARK), false); return;
+    }
     const char* o = g_status.c_str();
-    set(ID_CAP_TXT, g_capturing ? L"録画中: " + W(Sx(o, "captureFile")) + fmtw(L"  (%s)", bytesw(N(o, "captureBytes")).c_str()) : L"録画: 停止中");
+    if (g_capturing) { std::string cf = Sx(o, "captureFile"); if (!cf.empty()) g_lastCap = W(cf); }
+    set(ID_CAP_TXT, g_capturing ? L"録画中: " + g_lastCap + fmtw(L"  (%s)", bytesw(N(o, "captureBytes")).c_str())
+                  : g_lastCap.empty() ? L"録画: 停止中" : L"録画: 停止中（最後のファイル: " + g_lastCap + L"）");
     set(ID_LOG_TXT, L"ログ: " + W(Sx(o, "logFile")));
     EnableWindow(H(ID_CAP_START), true); EnableWindow(H(ID_CAP_STOP), g_capturing); EnableWindow(H(ID_CAP_MARK), g_capturing);
+}
+static void copy_text(const std::wstring& t) {
+    if (!OpenClipboard(g_wnd)) return;
+    EmptyClipboard();
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (t.size() + 1) * sizeof(wchar_t));
+    if (h) { memcpy(GlobalLock(h), t.c_str(), (t.size() + 1) * sizeof(wchar_t)); GlobalUnlock(h); SetClipboardData(CF_UNICODETEXT, h); }
+    CloseClipboard();
 }
 
 // ---------------------------------------------------------------- polling
@@ -370,7 +385,7 @@ static void build_ui() {
     mk(L"STATIC", L"車両", 0, X, Y + 272, 640, 18, ID_VEH_LBL, 0);
     mk(L"BUTTON", L"車両一覧を表示（デバッグ用）", WS_TABSTOP | BS_AUTOCHECKBOX, X + WID - 220, Y + 270, 220, 22, ID_VEH_CHK, 0);
     HWND vl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 292, WID, 220, ID_VEH_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(vl, { {L"ID", 60}, {L"位置 (x, y, z)", 220}, {L"I_src", 60}, {L"受信者数", 70}, {L"受信者 (SteamID:間隔)", 430} });
+    lv_cols(vl, { {L"ID", 50}, {L"グループ", 60}, {L"位置 (x, y, z)", 210}, {L"I_src", 50}, {L"受信者数", 60}, {L"受信者 (SteamID:間隔)", 400} });
 
     // --- settings tab
     mk(L"STATIC", L"項目をクリックして値を編集し「適用」。適用した値は稼働中すぐ効きます。「iniに保存」で次回以降にも引き継がれます。",
@@ -404,6 +419,7 @@ static void build_ui() {
     mk(L"BUTTON", L"録画開始（新規ファイル）", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 146, 180, 26, ID_CAP_START, 3);
     mk(L"BUTTON", L"録画停止", WS_TABSTOP | BS_PUSHBUTTON, X + 190, Y + 146, 100, 26, ID_CAP_STOP, 3);
     mk(L"BUTTON", L"マーカーを打つ", WS_TABSTOP | BS_PUSHBUTTON, X + 300, Y + 146, 120, 26, ID_CAP_MARK, 3);
+    mk(L"BUTTON", L"ファイル名をコピー", WS_TABSTOP | BS_PUSHBUTTON, X + 430, Y + 146, 150, 26, ID_CAP_COPY, 3);
     mk(L"STATIC", L"", 0, X, Y + 184, WID, 18, ID_LOG_TXT, 3);
     mk(L"BUTTON", L"captures フォルダを開く", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 208, 180, 26, ID_OPEN_DIR, 3);
     mk(L"STATIC", L"上のログ設定は稼働中すぐ効き、「設定」タブの「iniに保存」で次回以降にも残ります。不具合報告のときは captures フォルダ内の .log（と必要なら .swcap）を送ってください。",
@@ -438,6 +454,7 @@ static void on_command(int id) {
     case ID_CAP_START: ipc("capture.start"); poll(); break;
     case ID_CAP_STOP:  ipc("capture.stop");  poll(); break;
     case ID_CAP_MARK:  { std::string r = ipc("capture.mark"); if (ipc_ok(r)) set(ID_CAP_TXT, fmtw(L"マーカー #%.0f を記録しました", N(r.c_str(), "mark"))); break; }
+    case ID_CAP_COPY:  { size_t k = g_lastCap.find_last_of(L"\\/"); copy_text(k == std::wstring::npos ? g_lastCap : g_lastCap.substr(k + 1)); break; }
     case ID_OPEN_DIR:  ShellExecuteW(g_wnd, L"open", W(injector::exe_dir() + "captures").c_str(), nullptr, nullptr, SW_SHOW); break;
     }
 }

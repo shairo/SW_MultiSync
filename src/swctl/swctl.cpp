@@ -111,7 +111,7 @@ static void print_peers(const std::string& r, bool rates) {
 
 static void print_vehicles(const std::string& r) {
     const char* o = r.c_str();
-    printf("%-6s %-8s %-30s %-6s %s\n", "id", "tick", "pos (x y z)", "I_src", "feeds (steamId:gap)");
+    printf("%-6s %-6s %-8s %-30s %-6s %s\n", "id", "group", "tick", "pos (x y z)", "I_src", "feeds (steamId:gap)");
     json::for_each_elem(json::find_value(o, "vehicles"), [&](const char* v) {
         double pos[3] = {0,0,0};
         json::arr_nums(json::find_value(v, "pos"), pos, 3);
@@ -119,7 +119,8 @@ static void print_vehicles(const std::string& r) {
         snprintf(posS, sizeof posS, "%.1f %.1f %.1f", pos[0], pos[1], pos[2]);
         double sg = N(v, "srcGap");
         if (sg > 0) snprintf(srcS, sizeof srcS, "%.0f", sg); else strcpy(srcS, "-");
-        printf("%-6.0f %-8.0f %-30s %-6s", N(v, "id"), N(v, "tick"), posS, srcS);
+        char grpS[16]; double g; if (json::get_num(v, "group", g)) snprintf(grpS, sizeof grpS, "%.0f", g); else strcpy(grpS, "?");
+        printf("%-6.0f %-6s %-8.0f %-30s %-6s", N(v, "id"), grpS, N(v, "tick"), posS, srcS);
         json::for_each_elem(json::find_value(v, "feeds"), [&](const char* f) {
             printf(" %s:%.0f", ID(f, "steamId").c_str(), N(f, "gap"));
         });

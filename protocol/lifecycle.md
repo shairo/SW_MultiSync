@@ -26,7 +26,7 @@ tick-for-tick — e.g. id 18's two 0x2C (8236, 10371) landed exactly on its two 
 ```
 0x96 (150) len 13  spawn create : tag + u32 vehId + 5 B  — emitted as a PAIR (two 13-B: id then 0)
 0x37 ( 55) len 54  placement    : tag + u32 vehId + double[3] pos + 12 B + f32=1.0 + 6 B
-0x2B ( 43) len 90+nA+nB placement-2 : tag + double[3] pos + f32[4] quat + u16 nA + strA (spawn-location name, e.g. `hangar_edit`, empty for addon spawns) + u16 nB + strB (display name, e.g. `BLUE` for an addon flag) + double[3] + u32 (= vehId on normal spawns, vehId-2 on the flags — TBD) + u32 vehId + u32 + 4 B flags + u16 0 (VARIABLE; always followed by 0x62 (12 B: u32 20000 · u32 5). recordCount-verified on a 3-vehicle warp, session_20260917_005339)
+0x2B ( 43) len 90+nA+nB placement-2 : tag + double[3] pos + f32[4] quat + u16 nA + strA (spawn-location name, e.g. `hangar_edit`, empty for addon spawns) + u16 nB + strB (display name, e.g. `BLUE` for an addon flag) + double[3] + **u32 groupId** (spawn-group id = id of the group's first vehicle: a 3-body spawn 35/36/37 carries 34 in all three; session_20260919_115624) + u32 vehId + u32 + 4 B flags + u16 0 (VARIABLE; always followed by 0x62 (12 B: u32 20000 · u32 5). recordCount-verified on a 3-vehicle warp, session_20260917_005339)
 0x2D ( 45) len 17  load state   : push family, 12 + u32 payloadLen@8
 0x2F ( 47) var     load state   : push family, 12 + u32@8 (zlib transform/state)
 ```

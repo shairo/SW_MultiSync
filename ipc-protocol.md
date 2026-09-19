@@ -55,7 +55,9 @@ top. `connected` is false after the ch15 close byte or 5 s without any traffic t
 for over 10 minutes are dropped from the list (and from the DLL's table). Counters are per DLL lifetime.
 
 ### vehicles[] entry
-`id tick pos[3] rot[4] srcGap feeds[{steamId,gap}]`
+`id tick pos[3] rot[4] srcGap [group] feeds[{steamId,gap}]`
+`group` is the spawn group id (a multi-body spawn shares one; equals the first vehicle's id), present
+only for vehicles whose 0x2B placement was seen while hooked.
 `srcGap` is I_src: the EMA of ticks between fresh position samples across all native feeds
 (0 = unknown yet).
 `feeds` lists which recipients receive this vehicle natively and their native gap in ticks

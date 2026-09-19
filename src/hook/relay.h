@@ -237,6 +237,7 @@ constexpr uint32_t kRefreshMargin = 3;    // promises last I + this, re-sent eve
 
 // state (protected by the caller's send lock)
 inline std::unordered_map<uint32_t, Veh>                 g_veh;      // vehId -> freshest sample
+inline std::unordered_map<uint32_t, uint32_t>            g_group;    // vehId -> spawn group id (from 0x2B; only vehicles spawned while hooked)
 inline std::map<std::pair<uint64_t, uint32_t>, Sent>     g_sent;     // (peer,veh) -> last promise
 inline std::map<std::pair<uint64_t, uint32_t>, uint32_t> g_natLast; // (peer,veh) -> last NATIVE receipt tick
 inline std::map<std::pair<uint64_t, uint32_t>, uint32_t> g_natGap;  // (peer,veh) -> last native gap (distance proxy)
@@ -277,6 +278,14 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
             // at once. On reload (unload case, same id) a fresh 0x81 repopulates g_veh, so this is safe.
             // This is also the teleport/respawn guard: no velocity ever spans the jump.
             g_veh.erase(rec::U32(body, blen, off + 4));
+            if (tag == 0x38) g_group.erase(rec::U32(body, blen, off + 4));       // despawned for good
+        }
+        if (tag == 0x2B) {
+            // Spawn placement: ... + double[3] + u32 groupId + u32 vehId + ... (lifecycle.md). A multi-body
+            // spawn emits one 0x2B per vehicle, all carrying the group's id (= the first vehicle's id).
+            int nA = (int)rec::U16(body, blen, off + 44), nB = (int)rec::U16(body, blen, off + 46 + nA);
+            int tl = off + 48 + nA + nB + 24;
+            g_group[rec::U32(body, blen, tl + 4)] = rec::U32(body, blen, tl);
         }
         if (tag == 0x81) {
             uint32_t V = rec::U32(body, blen, off + 4);

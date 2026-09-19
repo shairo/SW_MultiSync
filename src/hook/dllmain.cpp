@@ -399,6 +399,8 @@ static void write_vehicles(json::JsonW& w) {
          .key("pos").arr().num(v.cx).num(v.cy).num(v.cz).end()
          .key("rot").arr().num((double)v.cq[0]).num((double)v.cq[1]).num((double)v.cq[2]).num((double)v.cq[3]).end()
          .kv("srcGap", v.srcGap);   // I_src: EMA of ticks between fresh samples (0 = unknown)
+        auto grp = relay::g_group.find(kv.first);
+        if (grp != relay::g_group.end()) w.kv("group", (unsigned)grp->second);   // absent: spawned before we hooked
         // which recipients see this vehicle, and how coarsely (native gap in ticks = distance proxy)
         w.key("feeds").arr();
         for (auto& g : relay::g_natGap) if (g.first.second == kv.first)
