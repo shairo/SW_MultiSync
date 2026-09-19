@@ -1,7 +1,8 @@
 @echo off
 setlocal
 set VS=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools
-call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+rem vcvars64 tries vswhere.exe (not on PATH here) before its fixed-path fallback; hide that noise.
+call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 if errorlevel 1 (echo vcvars64 failed & exit /b 1)
 
 set ROOT=%~dp0
