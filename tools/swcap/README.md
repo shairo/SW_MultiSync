@@ -66,7 +66,7 @@ dotnet run -c Release -- vehscan "$CAP" --id <veh> --peer <搭乗者steamid>
 | `eta [--peer S]` | 0x81 の dETA 分布と実同期間隔 |
 | `lifespan [--near T]` | 車両ごとの 0x81 first/last tick + 件数 |
 | `attick --at T [--w N]` | tick窓内のレコード（フラッド系タグは除外） |
-| `when --tag N` / `marks` | タグ出現時刻 / F8マーカー（再現用） |
+| `when --tag N` / `marks` | タグ出現時刻 / キャプチャマーカー（`capture.mark`、再現用） |
 | `validate [--peer S]` / `walk --seq N|--tag N` | レコード長ルールで走査 / 1メッセージの内訳 |
 | `bw` / `shadow [--lod]` / `resend` | relay の帯域見積 / 因果sim / 再送痕跡 |
 | `unz --id N` | 0x2F の zlib ペイロード展開 |

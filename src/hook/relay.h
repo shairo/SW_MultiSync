@@ -8,10 +8,10 @@
 // pose = predict(ETA − Λ) with ETA = tick + I_src: the client glides at the true velocity and sits
 // a steady Λ ticks behind reality. A new record goes out whenever a fresh sample exists or the last
 // promise is about to expire (dead-reckoning bridges a stalled source until `stale`).
-// See 目的と設計.md §3-§4.10. All functions assume the caller holds the send lock (g_cs).
+// See 目的と設計.md §3-§4. All functions assume the caller holds the send lock (g_cs).
 //
-// Observation is passive (never changes a send). Injection is gated by g_relayInject (F6, default
-// OFF) and only ever runs on a message rec::walk fully decoded, on a private COPY of the buffer.
+// Observation is passive (never changes a send). Injection is gated by g_relayInject (IPC `relay.set`,
+// or `relay=1` in swhook.ini at startup) and only ever runs on a message rec::walk fully decoded, on a private COPY of the buffer.
 #pragma once
 #include <cstdint>
 #include <cstring>
@@ -27,7 +27,7 @@
 
 namespace relay {
 
-// Client model (verified, 目的と設計.md §1-§2): a 0x81 carries a pose and an ETA tick; the client
+// Client model (verified, 目的と設計.md §2): a 0x81 carries a pose and an ETA tick; the client
 // glides from where it is to that pose, arriving at the ETA, and STOPS there if nothing newer came.
 // So with a record every I ticks whose pose is the true pose, the vehicle renders I ticks behind.
 // Sending pose = P(ETA − Λ) instead (extrapolated along the velocity) makes it arrive at the true

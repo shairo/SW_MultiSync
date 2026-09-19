@@ -13,7 +13,7 @@ public sealed record Frame(
 {
     public bool Truncated => Data.Length < Size;
 
-    // Transport framing (see AGENTS.md): +0 u32 fragFlag, +4 u32 totalBodyLen, +8.. bodyChunk.
+    // Transport framing (see protocol/transport.md): +0 u32 fragFlag, +4 u32 totalBodyLen, +8.. bodyChunk.
     public uint FragFlag     => Data.Length >= 4 ? BinaryPrimitives.ReadUInt32LittleEndian(Data.AsSpan(0)) : 0;
     public uint TotalBodyLen => Data.Length >= 8 ? BinaryPrimitives.ReadUInt32LittleEndian(Data.AsSpan(4)) : 0;
     public bool IsHead       => FragFlag == 0;

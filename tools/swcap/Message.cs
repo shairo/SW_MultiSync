@@ -28,7 +28,7 @@ public sealed class Message
     // Every gameplay msgType=8 packet observed so far is single-frame. Multi-frame BULK transfers
     // (tiles type=9, big mod-file pushes) use a DIFFERENT, not-yet-decoded chunking scheme where
     // the +0 field takes values 0..3 (a lane/stream id, NOT a head/continuation flag) — see
-    // AGENTS.md. We do NOT guess-merge those; each such frame passes through as Bulk=true so no
+    // protocol/transport.md. We do NOT guess-merge those; each such frame passes through as Bulk=true so no
     // data is silently dropped and the bulk scheme can be studied separately.
     public bool Bulk;
 

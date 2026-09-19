@@ -5,6 +5,7 @@ a `u32 tag`. This file is the **index + master tag table**; details live in cate
 [`protocol/`](protocol/). Length rules are implemented in **`tools/swcap/Records.cs`** (source of truth);
 the analysis playbook is **`tools/swcap/README.md`**.
 
+- [transport.md](protocol/transport.md) — frame header, channels, fragmentation / bulk transfers
 - [reference.md](protocol/reference.md) — envelope, walker/recordCount, `--peer`, tools, scenario map, periodic tags, non-records
 - [lifecycle.md](protocol/lifecycle.md) — vehicle & object spawn / load / unload / despawn / destroy
 - [sync.md](protocol/sync.md) — position/physics sync (0x81, 0x39, 0x1B, 0x1D, 0x50)
