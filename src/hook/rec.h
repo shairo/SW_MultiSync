@@ -184,4 +184,71 @@ inline Walk walk(const uint8_t* body, int len) {
     return w;
 }
 
+// ---- client→server stream (RECV, ch0, msgType=3) — protocol/client.md ----
+// Envelope: u32 1 · u32 3 · u16 1 · u16 recordCount · records at +14. Records are `u8 tag + 3 pad`
+// then payload. Lengths from client.md plus session_20260913 byte dumps (0x1B/0x15/0x68 = tag+u32,
+// 0x1F = bare, 0x02 = chat text, 0x22 = tag+double[3]+u8, 0x09 = 52). Unknown tags (join burst,
+// 0x35, 0x17 variants) stop the walk: the frame is counted partial and dumped like a SEND failure.
+inline int decode_client_len(const uint8_t* b, int len, int off) {
+    if (off + 4 > len) return -1;
+    int L = -1;
+    switch (b[off]) {
+        case 0x66: L = 20; break;   // camera look
+        case 0x2F: L = 60; break;   // player pose: +4 double[3] (const) · +28 double[3] world pos · u32 · u32
+        case 0x04: L = 5;  break;
+        case 0x34: L = 24; break;   // 1 Hz heartbeat
+        case 0x0B: L = 32; break;   // keypad value set
+        case 0x51: L = 42; break;   // held-item state
+        case 0x50: L = 8;  break;   // hotbar select
+        case 0x0C: L = 28; break;   // seat enter request
+        case 0x0D: L = 8;  break;   // seat exit request
+        case 0x30: L = 12; break;   // seat state
+        case 0x64: L = 20; break;   // seat key state
+        case 0x65: L = 9;  break;   // seat axis value
+        case 0x39: L = 25; break;   // character vitals
+        case 0x48: L = 37; break;   // game settings bool[33]
+        case 0x31: case 0x4B: case 0x49: L = 8; break;   // time / day-length / wind sliders
+        case 0x2A: L = 16; break;   // weather slider
+        case 0x32: case 0x2C: case 0x4A: case 0x45: L = 5; break;   // settings bools, menu open/close
+        case 0x1C: L = 8;  break;   // vehicle despawn request
+        case 0x28: L = 12; break;   // fog cleared on tile
+        case 0x19: L = 13; break;   // tile purchase
+        case 0x1A: case 0x37: case 0x36: case 0x2E: case 0x1F: L = 4; break;   // bare tags
+        case 0x38: L = 13; break;   // heal request
+        case 0x01: L = 73; break;   // seat-entry snapshot
+        case 0x14: case 0x13: L = 12; break;   // NPC follow / pick up
+        case 0x06: L = 25; break;   // NPC put down
+        case 0x17: L = 118; break;  // character appearance (a 114-B variant exists → partial)
+        case 0x18: L = 28; break;   // tag + double[3]
+        case 0x22: L = 29; break;   // tag + double[3] + u8
+        case 0x1B: case 0x29: case 0x15: case 0x68: L = 8; break;   // tag + u32 (vehicle load acks etc.)
+        case 0x09: L = 52; break;
+        case 0x02: L = 6 + (int)U16(b, len, off + 4); break;          // chat text
+        case 0x0A: L = 40 + (int)U16(b, len, off + 38); break;        // component interact (name)
+        case 0x52: L = 23 + (int)U16(b, len, off + 12); break;        // item action request
+        default: return -1;
+    }
+    if (L <= 0 || off + L > len) return -1;
+    return L;
+}
+
+// Walk a msgType=3 client body; first81 is reused for the offset of the first 0x2F (player pose).
+inline Walk walk_client(const uint8_t* body, int len) {
+    Walk w{ false, 14, 0, 0, -1 };
+    if (len < 14) { w.consumed = 0; return w; }
+    int count = (int)U16(body, len, 10);
+    w.recordCount = count;
+    int off = 14;
+    for (int i = 0; i < count; i++) {
+        if (off >= len) break;
+        int L = decode_client_len(body, len, off);
+        if (L <= 0) { w.consumed = off; w.walked = i; return w; }
+        if (body[off] == 0x2F && w.first81 < 0) w.first81 = off;
+        off += L; w.walked = i + 1;
+    }
+    w.consumed = off;
+    w.full = (off == len && w.walked == count);
+    return w;
+}
+
 } // namespace rec

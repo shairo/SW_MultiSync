@@ -166,7 +166,7 @@ static rec::Walk selftest(const uint8_t* body, int blen) {
 // nothing fails). Capped by dumpWalkFailMax frames per session. Caller holds g_cs.
 static FILE* g_wf = nullptr;
 static char  g_wfPath[MAX_PATH] = {0};
-static void dump_walkfail(uint64_t seq, uint64_t sid, int32_t ch, int32_t flags, const rec::Walk& w, const void* data, uint32_t cub) {
+static void dump_walkfail(uint8_t dir, uint64_t seq, uint64_t sid, int32_t ch, int32_t flags, const rec::Walk& w, const void* data, uint32_t cub) {
     if (!relay::g_cfg.dumpWalkFail) return;
     if (stats::g_walkFailDumped >= (uint64_t)relay::g_cfg.dumpWalkFailMax) return;
     if (!g_wf) {
@@ -177,14 +177,14 @@ static void dump_walkfail(uint64_t seq, uint64_t sid, int32_t ch, int32_t flags,
         fwrite("SWCAP\x02", 1, 6, g_wf);
         logf("== walkfail file: %s ==\n", g_wfPath);
     }
-    uint8_t dir = 0; uint64_t t = GetTickCount64(); uint32_t stored = cub;
+    uint64_t t = GetTickCount64(); uint32_t stored = cub;
     fwrite(&dir, 1, 1, g_wf); fwrite(&seq, 8, 1, g_wf); fwrite(&t, 8, 1, g_wf); fwrite(&sid, 8, 1, g_wf);
     fwrite(&ch, 4, 1, g_wf); fwrite(&flags, 4, 1, g_wf); fwrite(&cub, 4, 1, g_wf); fwrite(&stored, 4, 1, g_wf);
     fwrite(data, 1, cub, g_wf); fflush(g_wf);
     stats::g_walkFailDumped++;
     const uint8_t* body = static_cast<const uint8_t*>(data) + 8;
-    logf("== walkfail #%llu: seq=%llu peer=%llu recs=%d walked=%d stop@%d tag=0x%X ==\n",
-         (unsigned long long)stats::g_walkFailDumped, (unsigned long long)seq, (unsigned long long)sid,
+    logf("== walkfail #%llu (%s): seq=%llu peer=%llu recs=%d walked=%d stop@%d tag=0x%X ==\n",
+         (unsigned long long)stats::g_walkFailDumped, dir ? "recv" : "send", (unsigned long long)seq, (unsigned long long)sid,
          w.recordCount, w.walked, w.consumed, rec::U32(body, (int)cub - 8, w.consumed));
     logflush();
 }
@@ -236,7 +236,7 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
         } else ps.lastTick = tick;
         rec::Walk w = selftest(body, blen);
         full = w.full;
-        if (full) ps.walkFull++; else { ps.walkPartial++; dump_walkfail(n, sid, ch, flags, w, data, cub); }
+        if (full) ps.walkFull++; else { ps.walkPartial++; dump_walkfail(0, n, sid, ch, flags, w, data, cub); }
         if (full) {
             relay::observe(sid, body, blen, tick);                   // passive: keep caches warm
             if (g_relay) {                                           // build the injected copy
@@ -292,6 +292,21 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
             cap_event(1, n, sid, m->m_nChannel, m->m_nFlags, m->m_pData, (uint32_t)m->m_cbSize);
             stats::Peer& ps = stats::touch(sid, now);
             ps.recvCount++; ps.recvBytes += (uint64_t)m->m_cbSize;
+            // Client stream (ch0 msgType=3, single-frame): walk it for the understanding KPI and pick
+            // the player's world position out of 0x2F. Passive — nothing on the recv path is modified.
+            const uint8_t* b = static_cast<const uint8_t*>(m->m_pData); uint32_t cub = (uint32_t)m->m_cbSize;
+            if (m->m_nChannel == 0 && cub >= 22 && *reinterpret_cast<const uint32_t*>(b) == 0) {
+                const uint8_t* body = b + 8; int blen = (int)cub - 8;
+                if (rec::U32(body, blen, 0) == 1 && rec::U32(body, blen, 4) == 3) {
+                    ps.type3++;
+                    rec::Walk w = rec::walk_client(body, blen);
+                    if (w.full) ps.rwalkFull++; else { ps.rwalkPartial++; dump_walkfail(1, n, sid, m->m_nChannel, m->m_nFlags, w, b, cub); }
+                    if (w.first81 >= 0 && w.first81 + 52 <= blen) {
+                        memcpy(&ps.px, body + w.first81 + 28, 8); memcpy(&ps.py, body + w.first81 + 36, 8); memcpy(&ps.pz, body + w.first81 + 44, 8);
+                        ps.posMs = now;
+                    }
+                }
+            }
         }
         LeaveCriticalSection(&g_cs);
     }
@@ -389,7 +404,10 @@ static void write_peers(json::JsonW& w) {
          .kv("recvCount", p.recvCount).kv("recvBytes", p.recvBytes)
          .kv("injSends", p.injSends).kv("injBytes", p.injBytes).kv("injRecords", p.injRecords)
          .kv("type8", p.type8).kv("walkFull", p.walkFull).kv("walkPartial", p.walkPartial)
-         .kv("tickRewinds", p.tickRewinds).kv("vehicles", vehs).end();
+         .kv("tickRewinds", p.tickRewinds).kv("vehicles", vehs)
+         .kv("type3", p.type3).kv("rwalkFull", p.rwalkFull).kv("rwalkPartial", p.rwalkPartial);
+        if (p.posMs) w.key("pos").arr().num(p.px).num(p.py).num(p.pz).end().kv("posMs", p.posMs);
+        w.end();
     }
     w.end();
 }

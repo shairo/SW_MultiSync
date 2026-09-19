@@ -93,8 +93,8 @@ static std::map<std::string, PeerSample> g_prev; static double g_prevMs = 0;
 static void print_peers(const std::string& r, bool rates) {
     const char* o = r.c_str();
     double now = N(o, "nowMs"); double dt = (g_prevMs && now > g_prevMs) ? (now - g_prevMs) / 1000.0 : 0;
-    printf("%-18s %-5s %9s %9s %9s %7s %5s %6s %6s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
-           rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "vehs", "type8", "rewind", "last");
+    printf("%-18s %-5s %9s %9s %9s %7s %7s %5s %6s %6s %-26s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
+           rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "rwalk%", "vehs", "type8", "rewind", "pos (x y z)", "last");
     json::for_each_elem(json::find_value(o, "peers"), [&](const char* p) {
         std::string id = ID(p, "steamId");
         bool conn = false; json::get_bool(p, "connected", conn);
@@ -102,9 +102,11 @@ static void print_peers(const std::string& r, bool rates) {
         double t8 = N(p, "type8"), wf = N(p, "walkFull");
         double vs = sb, vi = ib, vr = rb;
         if (rates) { PeerSample& ps = g_prev[id]; vs = dt ? (sb - ps.sendBytes) / dt : 0; vi = dt ? (ib - ps.injBytes) / dt : 0; vr = dt ? (rb - ps.recvBytes) / dt : 0; ps = {sb, ib, rb}; }
-        printf("%-18s %-5s %9s %9s %9s %6.1f%% %5.0f %6.0f %6.0f %.0fs ago\n", id.c_str(), conn ? "yes" : "no",
+        double t3 = N(p, "type3"), rwf = N(p, "rwalkFull"), pos[3] = {0,0,0}; char posS[40];
+        if (json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3) snprintf(posS, sizeof posS, "%.0f %.0f %.0f", pos[0], pos[1], pos[2]); else strcpy(posS, "-");
+        printf("%-18s %-5s %9s %9s %9s %6.1f%% %6.1f%% %5.0f %6.0f %6.0f %-26s %.0fs ago\n", id.c_str(), conn ? "yes" : "no",
                fmt_bytes(vs).c_str(), fmt_bytes(vi).c_str(), fmt_bytes(vr).c_str(),
-               t8 ? 100.0 * wf / t8 : 0, N(p, "vehicles"), t8, N(p, "tickRewinds"), (now - N(p, "lastSeenMs")) / 1000);
+               t8 ? 100.0 * wf / t8 : 0, t3 ? 100.0 * rwf / t3 : 0, N(p, "vehicles"), t8, N(p, "tickRewinds"), posS, (now - N(p, "lastSeenMs")) / 1000);
     });
     g_prevMs = now;
 }

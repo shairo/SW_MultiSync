@@ -18,6 +18,10 @@ struct Peer {
     uint64_t injSends = 0, injBytes = 0, injRecords = 0;
     // understanding gate, per recipient
     uint64_t type8 = 0, walkFull = 0, walkPartial = 0;
+    // client→server (RECV msgType=3) understanding, and the player's last reported world position
+    uint64_t type3 = 0, rwalkFull = 0, rwalkPartial = 0;
+    double   px = 0, py = 0, pz = 0;   // from client 0x2F (~every 5 ticks while moving)
+    uint64_t posMs = 0;                // GetTickCount64 of the last 0x2F; 0 = never
     uint32_t lastTick = 0;             // highest world tick seen in a type=8 to this peer
     uint64_t tickRewinds = 0;          // type=8 whose tick was below lastTick (server resend/rewind; never seen so far)
 };

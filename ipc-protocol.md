@@ -49,7 +49,11 @@ captureBytes logFile walkFailFile ipcPort ipcClients ipcRequests peerCount vehic
 
 ### peers[] entry
 `steamId connected firstSeenMs lastSeenMs lastTick sendCount sendBytes recvCount recvBytes
-injSends injBytes injRecords type8 walkFull walkPartial tickRewinds vehicles`
+injSends injBytes injRecords type8 walkFull walkPartial tickRewinds vehicles
+type3 rwalkFull rwalkPartial [pos[3] posMs]`
+`type3`/`rwalkFull`/`rwalkPartial` are the client→server (msgType=3) counterparts of the walk KPI;
+`pos` is the player's last world position from client 0x2F (absent until one is seen), `posMs` its
+GetTickCount64 stamp (compare with `nowMs`).
 `tickRewinds` counts type=8 frames whose world tick was below the highest seen for that peer
 (a server resend/rewind; the relay never touches those frames). Expected to stay 0.
 `sendBytes` = what the game itself sent this peer (native); `injBytes` = extra bytes we added on
