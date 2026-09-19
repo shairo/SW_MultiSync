@@ -53,7 +53,7 @@ verified in the long-range capture; meanings are still candidates unless stated.
 | 0x92 146 | 44 | `double[3] pos · f32[4]` — 145× in the long-range fight, ~1:1 with 0x76. Candidate: projectile / shell spawn (pos + velocity/orientation) |
 | 0x76 118 | 32 | `double[3] pos · f32` — recordCount-verified. Candidate: projectile end / impact point |
 | 0x31 49 | 20 | `u32 vehId · i32 x · i32 y · i32 z` — runs per vehicle: **voxel damage list** (vehicle damage was ON in these captures) |
-| 0x9D 157 | 67 | `u32 id · u32 1 · double[3] pos · 7 × f32 (0,1,0,0,0,0,1) · u8 1 · u16 0xFFFF` — runs; object/debris placement candidate |
+| 0x9D 157 | 67 | **EXPLOSION** ✅: `u32 kind (14 for a missile warhead) · u32 1 · double[3] world pos · f32[3] (0,1,0) up · f32[4] (0,0,0,1) quat · u8 1 · u16 0xFFFF`. Missile captures `session_20260919_134315_888` (veh 76, vehicle damage OFF) and `_134846_721` (veh 81, ON): one 0x9D at ground contact, in the SAME message as the missile's 0x81 and at its TRUE position (3856, 17, -6148 both runs) while that 0x81 carried ETA +29 — so clients draw the blast ~29 ticks (≈160 m at 340 m/s) ahead of where they show the missile. With damage ON a 0x35 body damage for the missile follows next tick; the vehicle itself kept flying (0x81 continue) in both runs. Earlier "runs" of 0x9D = several explosions in one message |
 | 0x7B 123 | 12+n1+n2 | **addon notification** (`server.notify`): `u16 title · u16 subtitle · u32 type` ("Game Start" / "20:00 left.") |
 | 0x4C 76, 0x8F 143, 0x3D 61 | 8 | `u32 id` — emitted as a 0x4C/0x8F/0x3D/0x3B quartet per incrementing id: map-object remove family (with 0x3B) |
 | 0xA9 169 | 32 | `i32 tileX · i32 tileZ · u32 100 · u32 0 · f32 500 · f32 200 · u32 0` — a real record after all (reference.md said otherwise) |
