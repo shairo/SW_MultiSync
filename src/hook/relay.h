@@ -46,7 +46,7 @@ struct Cfg {
     int    intervalMax = 60;   // coarsest relay cadence (ticks)
     int    lodDenser   = 8;    // cost cap: relay a vehicle no denser than native_gap / lodDenser (0 = always I_src)
     int    lag         = 5;    // target render lag Λ (ticks): the relayed vehicle sits this far behind reality
-    int    horizonMax  = 30;   // cap on the prediction horizon (ticks); beyond it Λ grows instead (limits turn overshoot)
+    int    horizonMax  = 30;   // cap on the prediction horizon (ticks) once the source stalls; never below 2·I + margin (limits turn overshoot)
     int    relayMinGap = 10;   // only relay when native gap exceeds this (else native is fine)
     double srcRatio    = 0.5;  // relay only when the source samples at most this fraction of the recipient's native gap
     int    stale       = 300;   // don't relay if freshest source older than this (ticks)
@@ -388,7 +388,12 @@ inline void fill_pose(uint8_t* r, int avail, const Veh& v, uint32_t targetTick) 
 // The promise we make recipient B for V at send tick `tick`: ETA and the pose's target tick.
 //   ETA    = tick + I + margin   (we re-send every I ticks, fresh sample or dead-reckoned)
 //   target = ETA − Λ        so the client renders Λ behind reality at the true speed
-//   horizon = target − sampleTick, capped at horizonMax (Λ grows instead; coarse sources overshoot less)
+//   horizon = target − sampleTick, capped at max(horizonMax, 2I + margin)
+// The cap must admit one full cadence of bridging: the second promise built from the same sample
+// (age ≈ I) targets ≈ 2I ahead of it. A cap below that pins successive targets to the same point, so
+// the client glides there once and then sits still until the next sample — stop-and-go on coarse
+// sources (missiles far from everyone, srcGap > ~16 with the defaults). horizonMax therefore only
+// bites when the source has stalled (age > I), which is the dead-reckoning bound it was meant to be.
 // When this is the last record we can send before `stale` cuts the source off, ETA is stretched to
 // the server's own next-send time instead, so the client keeps gliding until native takes over.
 inline void promise_of(const Veh& v, uint64_t peer, uint32_t V, uint32_t tick, uint32_t& eta, uint32_t& target) {
@@ -400,8 +405,9 @@ inline void promise_of(const Veh& v, uint64_t peer, uint32_t V, uint32_t tick, u
         auto eit = g_natEta.find(key);
         if (eit != g_natEta.end() && eit->second > eta) eta = eit->second;
     }
+    long hmax = 2L * I + (long)kRefreshMargin; if (hmax < g_cfg.horizonMax) hmax = g_cfg.horizonMax;
     long tl = (long)eta - g_cfg.lag;
-    if (tl - (long)v.curT > g_cfg.horizonMax) tl = (long)v.curT + g_cfg.horizonMax;
+    if (tl - (long)v.curT > hmax) tl = (long)v.curT + hmax;
     target = tl > (long)v.curT ? (uint32_t)tl : v.curT;
 }
 
