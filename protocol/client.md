@@ -58,7 +58,9 @@ The client-side records don't carry it; the server stamps it.
 | 0x14 | 12 | **NPC follow toggle** | tag+3 · u32 playerId · u32 npcId — broadcast as SEND 0x0D (14 B) |
 | 0x13 | 12 | **NPC pick up / carry** | tag+3 · u32 playerId · u32 npcId — broadcast as SEND 0x0E (14 B) |
 | 0x06 | 25 | **NPC put down** (sent as a pair) | tag+3 · u32 playerId · 17 B zero — broadcast as SEND 0x17 (25 B) |
-| 0x17 | 118 | **character appearance** (sent on seat exit) | tag+3 · u32 0x6A · u8 1 · 13× RGBA outfit colours · ints — echoed verbatim as SEND 0x61 (116) |
+| 0x17 | 8+u32 | **character appearance** (sent on seat exit) | tag+3 · u32 remaining len (0x6A → 114 B total) · u8 1 · 13× RGBA outfit colours · ints — echoed verbatim as SEND 0x61 (116) |
+| 0x05 | 9 | vehicle-related ack | tag+3 · u32 vehId · u8 1 (walkfail_20260919_125459) |
+| 0x21 | 4 | bare | after 0x66/0x2F (walkfail_20260919_125459) |
 
 ### 0x0A observations
 - Every press is a **pair** (pressed=1 then pressed=0, 80–550 ms apart) with identical voxel + hit

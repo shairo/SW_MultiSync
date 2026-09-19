@@ -251,6 +251,17 @@ public static class Records
             case 0xB9: // same header as 0xB8 + 8 B (48 B), runs.
                 r.Length = 48; r.Status = off + 48 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)} u32={U32(b, off + 8)}"; break;
+            case 0xBA: // 2x(veh,idx,i32[3]) + u8 (45 B). walkfail_20260919_125459
+                r.Length = 45; r.Status = off + 45 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"veh={U32(b, off + 4)} u32={U32(b, off + 8)}"; break;
+            case 0xBF: // 4x(veh,idx,i32[3]) + u32 RGBA (88 B), pairs with 0xC0 on the same voxels. walkfail_20260919_125459
+                r.Length = 88; r.Status = off + 88 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"veh={U32(b, off + 4)} rgba={U32(b, off + 84):X8}"; break;
+            case 0xC0: // 4x(veh,idx,i32[3],f32) (100 B). walkfail_20260919_125459
+                r.Length = 100; r.Status = off + 100 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"veh={U32(b, off + 4)}"; break;
+            case 0x04: // 16 B fixed, always the last record of its message. walkfail_20260919_125459 (x13)
+                r.Length = 16; r.Status = off + 16 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
             case 0x63: // RESPAWN POSITION: tag + u16 peer_id (probably) + double[3] world pos (30 B). Seen once, right after the death-phase 0x26 records. VERIFIED boundary (session_20260917_002237)
                 r.Length = 30; r.Status = off + 30 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"pos=({F64(b, off + 6):F1},{F64(b, off + 14):F1},{F64(b, off + 22):F1})"; break;
@@ -270,8 +281,12 @@ public static class Records
             // --- vehicle spawn cluster (session_20260914_232332_784, solved ×6; VERIFY on more data) ---
             case 0x96: r.Length = 13; r.Status = off + 13 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; // spawn create: tag + u32 id + 5B. Emitted as a PAIR (two 13-B 0x96: id then 0) = one create, two records.
                        r.Note = $"veh={U32(b, off + 4)}"; break;
-            case 0x37: r.Length = 54; r.Status = off + 54 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; // spawn placement: tag + u32 vehId + double[3] pos + 12B + f32=1 + 6B
-                       r.Note = $"veh={U32(b, off + 4)}"; break;
+            case 0x37: // spawn placement: tag + u32 vehId + double[3] pos + 12B + f32 + u8 u8 + u16 nA + name + u16 nB + strB (e.g. "tan524tan524") = 54 + nA + nB (54 when both empty). walkfail_20260919_125459
+            {
+                int nA = (int)U16(b, off + 50); int nB = (int)U16(b, off + 52 + nA);
+                r.Length = 54 + nA + nB; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"veh={U32(b, off + 4)} name={Str(b, off + 52, nA)} B={Str(b, off + 54 + nA, nB)}"; break;
+            }
             case 0x2B: // spawn placement2: tag + double[3] pos + f32[4] quat + u16 nA + strA (spawn-location name, e.g. "hangar_edit") + u16 nB + strB (display name, e.g. "BLUE" for an addon flag) + double[3] + u32 (= vehId for a normal spawn, vehId-2 for the addon flags — TBD) + u32 vehId + u32 + 4 B flags + u16 = 90 + nA + nB. VARIABLE. recordCount-verified (session_20260917_003856 / 005339 / 010256)
             {
                 int nA = (int)U16(b, off + 44); int nB = (int)U16(b, off + 46 + nA);

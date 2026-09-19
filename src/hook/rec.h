@@ -33,7 +33,10 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x45: L = 13; break;   // fog tile state (x,z,u8)
         case 0x4A: L = 12; break;   // tile purchased (x,z), + 0x62
         case 0x96: L = 13; break;   // vehicle create marker (13-B pair)
-        case 0x37: L = 54; break;   // vehicle spawn placement
+        case 0x37: {                                                    // vehicle spawn placement: +50 u16 nA + name + u16 nB + strB (54 when both empty)
+            int a = (int)U16(b, len, off + 50);
+            L = 54 + a + (int)U16(b, len, off + 52 + a); break;
+        }
         case 0xA8: L = 22; break;   // player look broadcast (peer_id, yaw, pitch)
         case 0x05: L = 34; break;
         case 0xA6: L = 22; break;   // seat key state (peer_id, keyMask)
@@ -88,8 +91,12 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x91: L = 28; break;   // per-peer lobby records
         case 0x5F: L = 10; break;
         case 0x16: L = 11; break;
-        case 0xB8: L = 52; break;   // vehicle component/body state runs
-        case 0xB9: L = 48; break;
+        case 0xB8: L = 52; break;   // vehicle component/body state runs: 2x(veh,idx,i32[3]) + u32 + u32
+        case 0xB9: L = 48; break;   //   2 entries + u32
+        case 0xBA: L = 45; break;   //   2 entries + u8
+        case 0xBF: L = 88; break;   //   4 entries + u32 RGBA (paint?), pairs with 0xC0
+        case 0xC0: L = 100; break;  //   4x(veh,idx,i32[3],f32)
+        case 0x04: L = 16; break;   // walkfail_20260919_125459 x13, always last record
         // --- subtype / payload-length driven ---
         case 0x28: L = (U32(b, len, off + 8) == 1) ? 12 : 46; break;
         case 0x50: L = 12 + (int)U32(b, len, off + 8); break;          // NPC/object state
@@ -218,7 +225,9 @@ inline int decode_client_len(const uint8_t* b, int len, int off) {
         case 0x01: L = 73; break;   // seat-entry snapshot
         case 0x14: case 0x13: L = 12; break;   // NPC follow / pick up
         case 0x06: L = 25; break;   // NPC put down
-        case 0x17: L = 118; break;  // character appearance (a 114-B variant exists → partial)
+        case 0x17: L = 8 + (int)U32(b, len, off + 4); break;   // character appearance: +4 u32 = remaining len (0x6A -> 114 B; 118-B variant assumed 0x6E)
+        case 0x05: L = 9;  break;   // tag + u32 vehId + u8
+        case 0x21: L = 4;  break;   // bare
         case 0x18: L = 28; break;   // tag + double[3]
         case 0x22: L = 29; break;   // tag + double[3] + u8
         case 0x1B: case 0x29: case 0x15: case 0x68: L = 8; break;   // tag + u32 (vehicle load acks etc.)

@@ -29,7 +29,7 @@ Mean: ✅ decoded · △ partial · ❌ unknown.
 | 0x5E | 94 | PLAYER teleport (map fast-travel): double[3] pos | ✅ | ✅ | sync |
 | 0x55 | 85 | PLAYER teleport (addon setPlayerPos): double[3] pos | ✅ | ✅ | sync |
 | 0x96 | 150 | vehicle create marker (13-B pair) | ✅ | ✅ | lifecycle |
-| 0x37 | 55 | vehicle spawn placement (pos) | ✅ | △ | lifecycle |
+| 0x37 | 55 | vehicle spawn placement (pos): 54 + nA (vehicle name @+50) + nB (@+52+nA) | ✅ | ✅ | lifecycle |
 | 0x2B | 43 | vehicle spawn placement-2 (90+nA+nB: location name + display name; always + 0x62) | ✅ | ✅ | lifecycle |
 | 0x2D | 45 | vehicle load state (push family) | ✅ | △ | lifecycle |
 | 0x2F | 47 | vehicle load state (zlib transform) | ✅ | △ | lifecycle |
@@ -57,7 +57,9 @@ Mean: ✅ decoded · △ partial · ❌ unknown.
 | 0x7B | 123 | addon notification (title/subtitle/type) | ✅ | ✅ | damage-combat |
 | 0x4C 0x8F 0x3D | 76 143 61 | map-object remove family (8 B, u32 id) with 0x3B | ✅ | △ | damage-combat |
 | 0x03 0x8D 0x91 0x5F 0x16 | 3 141 145 95 22 | lobby / per-peer records (player joined, peer message, …) | ✅ | △ | damage-combat |
-| 0xB8 0xB9 | 184 185 | vehicle component/body state runs (52 / 48 B) | ✅ | △ | damage-combat |
+| 0xB8 0xB9 0xBA | 184 185 186 | vehicle voxel runs: 2×(veh, idx, i32[3]) + u32,u32 / u32 / u8 (52 / 48 / 45 B) | ✅ | △ | damage-combat |
+| 0xBF 0xC0 | 191 192 | vehicle voxel runs ×4: + u32 RGBA (88 B) / each entry + f32 (100 B); paired on the same voxels | ✅ | △ | damage-combat |
+| 0x04 | 4 | 16 B fixed, always last record of its message (walkfail_20260919_125459 ×13) | ✅ | ❌ | — |
 | 0x88 | 136 | game settings bool[33] broadcast (37 B) — mirror of client 0x48 | ✅ | ✅ | settings |
 | 0x57 | 87 | time of day u32 seconds (8 B) — client 0x31 | ✅ | ✅ | settings |
 | 0x8B | 139 | day length? u32 (8 B) — client 0x4B | ✅ | △ | settings |
