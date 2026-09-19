@@ -5,18 +5,21 @@
 #include "../common/ipc_client.h"   // winsock2 must precede windows.h (injector.h)
 #include "../inject/injector.h"
 #include "../common/version.h"
+#include "../hook/relay.h"          // header-only: reads swhook.ini for the default ipcPort
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <map>
 
-static int  g_port = 28215;
+static int  g_port = 28215;        // swhook.ini's ipcPort next to swctl.exe, unless --port says otherwise
 static bool g_json = false;
 
 static void usage() {
     printf("swctl %s - swhook control\n"
            "usage: swctl [--port N] [--json] <command> [args]\n"
+           "  --port defaults to ipcPort in swhook.ini next to swctl.exe; pass it to reach a\n"
+           "  second server injected with a DLL whose ini uses another port\n"
            "  inject [--wait] [--pid N] [dll]\n"
            "                             LoadLibrary swhook.dll into server64.exe (needs admin);\n"
            "                             --pid picks one of several servers (see --port for its DLL)\n"
@@ -162,6 +165,8 @@ static int cmd_inject(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    relay::load_config_file((injector::exe_dir() + "swhook.ini").c_str());   // absent/unreadable: keep 28215
+    g_port = relay::g_cfg.ipcPort;
     int i = 1;
     for (; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) g_port = atoi(argv[++i]);
