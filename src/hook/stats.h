@@ -18,7 +18,8 @@ struct Peer {
     uint64_t injSends = 0, injBytes = 0, injRecords = 0;
     // understanding gate, per recipient
     uint64_t type8 = 0, walkFull = 0, walkPartial = 0;
-    uint32_t lastTick = 0;             // last world tick seen in a type=8 to this peer
+    uint32_t lastTick = 0;             // highest world tick seen in a type=8 to this peer
+    uint64_t tickRewinds = 0;          // type=8 whose tick was below lastTick (server resend/rewind; never seen so far)
 };
 
 inline std::map<uint64_t, Peer> g_peers;

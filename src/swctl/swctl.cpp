@@ -93,8 +93,8 @@ static std::map<std::string, PeerSample> g_prev; static double g_prevMs = 0;
 static void print_peers(const std::string& r, bool rates) {
     const char* o = r.c_str();
     double now = N(o, "nowMs"); double dt = (g_prevMs && now > g_prevMs) ? (now - g_prevMs) / 1000.0 : 0;
-    printf("%-18s %-5s %9s %9s %9s %7s %7s %6s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
-           rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "vehs", "type8", "last");
+    printf("%-18s %-5s %9s %9s %9s %7s %5s %6s %6s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
+           rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "vehs", "type8", "rewind", "last");
     json::for_each_elem(json::find_value(o, "peers"), [&](const char* p) {
         std::string id = ID(p, "steamId");
         bool conn = false; json::get_bool(p, "connected", conn);
@@ -102,9 +102,9 @@ static void print_peers(const std::string& r, bool rates) {
         double t8 = N(p, "type8"), wf = N(p, "walkFull");
         double vs = sb, vi = ib, vr = rb;
         if (rates) { PeerSample& ps = g_prev[id]; vs = dt ? (sb - ps.sendBytes) / dt : 0; vi = dt ? (ib - ps.injBytes) / dt : 0; vr = dt ? (rb - ps.recvBytes) / dt : 0; ps = {sb, ib, rb}; }
-        printf("%-18s %-5s %9s %9s %9s %6.1f%% %7.0f %6.0f %.0fs ago\n", id.c_str(), conn ? "yes" : "no",
+        printf("%-18s %-5s %9s %9s %9s %6.1f%% %5.0f %6.0f %6.0f %.0fs ago\n", id.c_str(), conn ? "yes" : "no",
                fmt_bytes(vs).c_str(), fmt_bytes(vi).c_str(), fmt_bytes(vr).c_str(),
-               t8 ? 100.0 * wf / t8 : 0, N(p, "vehicles"), t8, (now - N(p, "lastSeenMs")) / 1000);
+               t8 ? 100.0 * wf / t8 : 0, N(p, "vehicles"), t8, N(p, "tickRewinds"), (now - N(p, "lastSeenMs")) / 1000);
     });
     g_prevMs = now;
 }

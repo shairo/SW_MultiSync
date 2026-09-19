@@ -49,7 +49,9 @@ captureBytes logFile walkFailFile ipcPort ipcClients ipcRequests peerCount vehic
 
 ### peers[] entry
 `steamId connected firstSeenMs lastSeenMs lastTick sendCount sendBytes recvCount recvBytes
-injSends injBytes injRecords type8 walkFull walkPartial vehicles`
+injSends injBytes injRecords type8 walkFull walkPartial tickRewinds vehicles`
+`tickRewinds` counts type=8 frames whose world tick was below the highest seen for that peer
+(a server resend/rewind; the relay never touches those frames). Expected to stay 0.
 `sendBytes` = what the game itself sent this peer (native); `injBytes` = extra bytes we added on
 top. `connected` is false after the ch15 close byte or 5 s without any traffic to that peer; peers silent
 for over 10 minutes are dropped from the list (and from the DLL's table). Counters are per DLL lifetime.

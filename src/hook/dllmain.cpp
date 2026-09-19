@@ -230,7 +230,10 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
     bool full = false;
     int newcub = 0; uint8_t* inj = nullptr;
     if (type8) {
-        ps.type8++; ps.lastTick = tick;
+        ps.type8++;
+        if (tick < ps.lastTick) {          // world tick went backwards: the relay guard leaves such frames untouched
+            if (++ps.tickRewinds <= 10) { logf("== tick rewind to %llu: %u < %u (#%llu) ==\n", (unsigned long long)sid, tick, ps.lastTick, (unsigned long long)ps.tickRewinds); logflush(); }
+        } else ps.lastTick = tick;
         rec::Walk w = selftest(body, blen);
         full = w.full;
         if (full) ps.walkFull++; else { ps.walkPartial++; dump_walkfail(n, sid, ch, flags, w, data, cub); }
@@ -386,7 +389,7 @@ static void write_peers(json::JsonW& w) {
          .kv("recvCount", p.recvCount).kv("recvBytes", p.recvBytes)
          .kv("injSends", p.injSends).kv("injBytes", p.injBytes).kv("injRecords", p.injRecords)
          .kv("type8", p.type8).kv("walkFull", p.walkFull).kv("walkPartial", p.walkPartial)
-         .kv("vehicles", vehs).end();
+         .kv("tickRewinds", p.tickRewinds).kv("vehicles", vehs).end();
     }
     w.end();
 }
