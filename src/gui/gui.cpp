@@ -5,7 +5,8 @@
 //
 // Layout: a fixed, DPI-scaled window with three tabs — Status (sync toggle, traffic, players,
 // vehicles), Settings (every config knob, editable, save/reload ini), Log/Capture.
-// Requires administrator (manifest below) because OpenProcess(PROCESS_ALL_ACCESS) on server64 does.
+// Requires administrator (manifest below) because injecting into server64 (OpenProcess +
+// CreateRemoteThread) needs it.
 #include "../common/ipc_client.h"   // winsock2 before windows.h
 #include "../inject/injector.h"
 #include "../common/version.h"
@@ -503,7 +504,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
     g_fontBig = CreateFontIndirectW(&ncm.lfMessageFont);
 
     WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = hi; wc.lpszClassName = L"SWMultiSyncMain";
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    HICON appIcon = LoadIconW(hi, MAKEINTRESOURCEW(1));   // IDI_APPICON from version.rc; nullptr if absent
+    wc.hIcon = appIcon ? appIcon : LoadIcon(nullptr, IDI_APPLICATION);
     RegisterClassW(&wc);
     RECT r{ 0, 0, S(912), S(632) }; AdjustWindowRect(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
     g_wnd = CreateWindowW(wc.lpszClassName, fmtw(L"SW MultiSync v%hs", SWHOOK_VERSION).c_str(),

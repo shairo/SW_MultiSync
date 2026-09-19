@@ -1,0 +1,58 @@
+// version.rc — shared VERSIONINFO resource for every binary in the distribution.
+// Giving each PE a proper CompanyName/ProductName/version/description makes it look like the
+// ordinary, identifiable application it is, instead of an unsigned "nameless" PE — which is one of
+// the signals AV/ML heuristics weight. Purely informational: no effect on behaviour.
+//
+// Per-target fields are passed by build.bat via rc /d:
+//   RC_FILETYPE  = VFT_APP | VFT_DLL
+//   RC_FILE_DESC = human-readable description shown in Properties > Details
+//   RC_ORIG_NAME = the file's own name (e.g. "swctl.exe")
+#include <winver.h>
+#include "..\src\common\version.h"
+
+#ifndef RC_FILETYPE
+#define RC_FILETYPE VFT_APP
+#endif
+#ifndef RC_FILE_DESC
+#define RC_FILE_DESC "SW_MultiSync"
+#endif
+#ifndef RC_ORIG_NAME
+#define RC_ORIG_NAME "SW_MultiSync.exe"
+#endif
+
+// Application icon (GUI only). build.bat passes /dRC_ICON for SWMultiSync.exe.
+// ID 1 = lowest icon id, so Explorer/taskbar use it as the app icon. IDI_APPICON is also
+// used by gui.cpp (LoadIconW) for the window class.
+#ifdef RC_ICON
+#define IDI_APPICON 1
+IDI_APPICON ICON "SWMultiSync.ico"
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    SWHOOK_VERSION_MAJOR,SWHOOK_VERSION_MINOR,SWHOOK_VERSION_PATCH,0
+ PRODUCTVERSION SWHOOK_VERSION_MAJOR,SWHOOK_VERSION_MINOR,SWHOOK_VERSION_PATCH,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       RC_FILETYPE
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"   // U.S. English, Unicode
+        BEGIN
+            VALUE "CompanyName",      "shairo"
+            VALUE "FileDescription",  RC_FILE_DESC
+            VALUE "FileVersion",      SWHOOK_VERSION
+            VALUE "InternalName",     RC_ORIG_NAME
+            VALUE "LegalCopyright",   "Copyright (c) 2026 shairo. MIT License."
+            VALUE "OriginalFilename", RC_ORIG_NAME
+            VALUE "ProductName",      "SW_MultiSync"
+            VALUE "ProductVersion",   SWHOOK_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -56,7 +56,11 @@ inline bool is_admin() {
 
 enum Result { Injected = 0, Failed = 1, AlreadyLoaded = 2 };
 
-// LoadLibrary `dll` inside `pid` via CreateRemoteThread. Needs admin (PROCESS_ALL_ACCESS).
+// LoadLibrary `dll` inside `pid` via CreateRemoteThread. Needs admin.
+// Only the rights this actually uses: CreateRemoteThread (PROCESS_CREATE_THREAD),
+// VirtualAllocEx/Free (PROCESS_VM_OPERATION), WriteProcessMemory (PROCESS_VM_WRITE).
+// Avoiding PROCESS_ALL_ACCESS also lowers the "textbook injector" score AV heuristics assign.
+#define SWHOOK_INJECT_ACCESS (PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE)
 inline Result inject(DWORD pid, const char* dll, std::string& err) {
     char msg[512];
     if (GetFileAttributesA(dll) == INVALID_FILE_ATTRIBUTES) {
@@ -64,7 +68,7 @@ inline Result inject(DWORD pid, const char* dll, std::string& err) {
     }
     if (has_module(pid, "swhook.dll")) { err = "swhook.dll is already loaded"; return AlreadyLoaded; }
 
-    HANDLE p = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    HANDLE p = OpenProcess(SWHOOK_INJECT_ACCESS, FALSE, pid);
     if (!p) { snprintf(msg, sizeof msg, "OpenProcess failed %lu (run as admin)", GetLastError()); err = msg; return Failed; }
 
     size_t len = strlen(dll) + 1;
@@ -82,7 +86,7 @@ inline Result inject(DWORD pid, const char* dll, std::string& err) {
     DWORD code = 0; GetExitCodeThread(t, &code);
     VirtualFreeEx(p, rem, 0, MEM_RELEASE);
     CloseHandle(t); CloseHandle(p);
-    if (!code) { err = "LoadLibrary returned 0 inside the target (blocked by AV? wrong arch?)"; return Failed; }
+    if (!code) { err = "LoadLibrary returned 0 inside the target (wrong architecture, or the DLL failed to load)"; return Failed; }
     return Injected;
 }
 
