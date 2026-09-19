@@ -277,8 +277,13 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
             // client until the `stale` timeout. Dropping the source pose makes managed() return false
             // at once. On reload (unload case, same id) a fresh 0x81 repopulates g_veh, so this is safe.
             // This is also the teleport/respawn guard: no velocity ever spans the jump.
-            g_veh.erase(rec::U32(body, blen, off + 4));
-            if (tag == 0x38) g_group.erase(rec::U32(body, blen, off + 4));       // despawned for good
+            uint32_t V = rec::U32(body, blen, off + 4);
+            g_veh.erase(V);
+            if (tag == 0x38) g_group.erase(V);                                   // despawned for good
+            // This recipient no longer has V: drop its per-(peer,veh) feed state so the peer's vehicle
+            // count reflects what it currently receives (a reload repopulates within two 0x81).
+            auto key = std::make_pair(peer, V);
+            g_natLast.erase(key); g_natGap.erase(key); g_natEta.erase(key); g_sent.erase(key);
         }
         if (tag == 0x2B) {
             // Spawn placement: ... + double[3] + u32 groupId + u32 vehId + ... (lifecycle.md). A multi-body
