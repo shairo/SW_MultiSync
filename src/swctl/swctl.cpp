@@ -17,10 +17,12 @@ static bool g_json = false;
 static void usage() {
     printf("swctl %s - swhook control\n"
            "usage: swctl [--port N] [--json] <command> [args]\n"
-           "  inject [--wait] [dll]      LoadLibrary swhook.dll into server64.exe (needs admin)\n"
+           "  inject [--wait] [--pid N] [dll]\n"
+           "                             LoadLibrary swhook.dll into server64.exe (needs admin);\n"
+           "                             --pid picks one of several servers (see --port for its DLL)\n"
            "  status                     hook / relay / capture state, walk rate, totals\n"
            "  peers                      per-player table\n"
-           "  vehicles                   vehicle table (id, pos, vel, feeds)\n"
+           "  vehicles                   vehicle table (id, pos, I_src, feeds)\n"
            "  watch [sec]                live status + peers with rates (Ctrl+C to quit)\n"
            "  relay on|off               enable / disable the sync relay\n"
            "  capture start|stop|mark    .swcap capture control\n"
@@ -106,16 +108,15 @@ static void print_peers(const std::string& r, bool rates) {
 
 static void print_vehicles(const std::string& r) {
     const char* o = r.c_str();
-    printf("%-6s %-8s %-30s %-24s %s\n", "id", "tick", "pos (x y z)", "vel (units/tick)", "feeds (steamId:gap)");
+    printf("%-6s %-8s %-30s %-6s %s\n", "id", "tick", "pos (x y z)", "I_src", "feeds (steamId:gap)");
     json::for_each_elem(json::find_value(o, "vehicles"), [&](const char* v) {
-        double pos[3] = {0,0,0}, vel[3] = {0,0,0};
+        double pos[3] = {0,0,0};
         json::arr_nums(json::find_value(v, "pos"), pos, 3);
-        const char* vp = json::find_value(v, "vel");
-        bool hasVel = vp && *vp == '[' && json::arr_nums(vp, vel, 3) == 3;
-        char posS[64], velS[64];
+        char posS[64], srcS[16];
         snprintf(posS, sizeof posS, "%.1f %.1f %.1f", pos[0], pos[1], pos[2]);
-        if (hasVel) snprintf(velS, sizeof velS, "%.3f %.3f %.3f", vel[0], vel[1], vel[2]); else strcpy(velS, "-");
-        printf("%-6.0f %-8.0f %-30s %-24s", N(v, "id"), N(v, "tick"), posS, velS);
+        double sg = N(v, "srcGap");
+        if (sg > 0) snprintf(srcS, sizeof srcS, "%.0f", sg); else strcpy(srcS, "-");
+        printf("%-6.0f %-8.0f %-30s %-6s", N(v, "id"), N(v, "tick"), posS, srcS);
         json::for_each_elem(json::find_value(v, "feeds"), [&](const char* f) {
             printf(" %s:%.0f", ID(f, "steamId").c_str(), N(f, "gap"));
         });
@@ -135,14 +136,20 @@ static void print_config(const std::string& r, const char* onlyKey) {
 }
 
 static int cmd_inject(int argc, char** argv) {
-    bool wait = false; std::string dll;
-    for (int i = 0; i < argc; i++) { if (!strcmp(argv[i], "--wait") || !strcmp(argv[i], "-w")) wait = true; else dll = argv[i]; }
+    bool wait = false; std::string dll; DWORD pid = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--wait") || !strcmp(argv[i], "-w")) wait = true;
+        else if (!strcmp(argv[i], "--pid") && i + 1 < argc) pid = (DWORD)atoi(argv[++i]);
+        else dll = argv[i];
+    }
     if (dll.empty()) dll = injector::default_dll_path();
     if (!injector::is_admin()) fprintf(stderr, "warning: not running as administrator; OpenProcess will likely fail\n");
-    DWORD pid = injector::find_pid("server64.exe");
-    if (!pid && wait) { printf("waiting for server64.exe..."); fflush(stdout);
-        while (!(pid = injector::find_pid("server64.exe"))) Sleep(1000); printf(" pid %lu\n", pid); }
-    if (!pid) { fprintf(stderr, "server64.exe is not running\n"); return 1; }
+    if (!pid) {   // no --pid: the first server64.exe found (several may be running)
+        pid = injector::find_pid("server64.exe");
+        if (!pid && wait) { printf("waiting for server64.exe..."); fflush(stdout);
+            while (!(pid = injector::find_pid("server64.exe"))) Sleep(1000); printf(" pid %lu\n", pid); }
+        if (!pid) { fprintf(stderr, "server64.exe is not running\n"); return 1; }
+    }
     std::string err;
     injector::Result res = injector::inject(pid, dll.c_str(), err);
     if (res == injector::Injected) printf("injected %s into pid %lu\n", dll.c_str(), pid);

@@ -42,6 +42,7 @@ static std::wstring g_lastErr;
 // last polled snapshot (raw JSON kept; parsed on render)
 static std::string g_status, g_peersJson, g_vehJson, g_cfgJson;
 static bool g_dllUp = false, g_hooked = false, g_relay = false, g_capturing = false;
+static bool g_showVeh = false;      // vehicle table is a debug aid (can be hundreds of rows): off unless toggled
 static std::string g_dllVersion;
 // rate computation: previous cumulative counters
 struct Prev { double sendBytes = 0, injBytes = 0, recvBytes = 0; };
@@ -57,7 +58,7 @@ enum {
     // header
     ID_SERVER_TXT, ID_DLL_TXT, ID_INJECT_BTN, ID_AUTO_CHK, ID_VERSION_TXT,
     // status tab
-    ID_RELAY_BTN, ID_RELAY_NOTE, ID_TRAFFIC_TXT, ID_WALK_TXT, ID_PEERS_LV, ID_VEH_LV, ID_PEERS_LBL, ID_VEH_LBL,
+    ID_RELAY_BTN, ID_RELAY_NOTE, ID_TRAFFIC_TXT, ID_WALK_TXT, ID_PEERS_LV, ID_VEH_LV, ID_PEERS_LBL, ID_VEH_LBL, ID_VEH_CHK,
     // settings tab
     ID_CFG_LV, ID_CFG_NAME, ID_CFG_EDIT, ID_CFG_APPLY, ID_CFG_HELP, ID_CFG_SAVE, ID_CFG_RELOAD, ID_CFG_NOTE,
     // startup tab (edits swhook.ini directly; no DLL needed)
@@ -283,14 +284,13 @@ static void render_peers() {
 }
 
 static void render_vehicles() {
+    if (!g_showVeh) { lv_fill(H(ID_VEH_LV), {}); set(ID_VEH_LBL, L"車両一覧は非表示です（デバッグ用）"); return; }
     const char* o = g_vehJson.c_str();
     std::vector<std::vector<std::wstring>> rows;
     json::for_each_elem(json::find_value(o, "vehicles"), [&](const char* v) {
-        double pos[3] = {0,0,0}, vel[3] = {0,0,0};
+        double pos[3] = {0,0,0};
         json::arr_nums(json::find_value(v, "pos"), pos, 3);
-        const char* vp = json::find_value(v, "vel");
-        bool hasVel = vp && *vp == '[' && json::arr_nums(vp, vel, 3) == 3;
-        double spd = hasVel ? sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]) * 60.0 * 3.6 : 0;   // units/tick -> km/h
+        double sg = N(v, "srcGap");
         std::wstring feeds; int nf = 0; double minGap = 1e9;
         json::for_each_elem(json::find_value(v, "feeds"), [&](const char* f) {
             uint64_t id = 0; json::get_u64(f, "steamId", id); double g = N(f, "gap");
@@ -299,10 +299,10 @@ static void render_vehicles() {
             feeds += fmtw(L"%llu:%.0f", (unsigned long long)id, g);
         });
         rows.push_back({ fmtw(L"%.0f", N(v, "id")), fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]),
-                         hasVel ? fmtw(L"%.1f km/h", spd) : L"-", fmtw(L"%d", nf), feeds });
+                         sg > 0 ? fmtw(L"%.0f", sg) : L"-", fmtw(L"%d", nf), feeds });
     });
     lv_fill(H(ID_VEH_LV), rows);
-    set(ID_VEH_LBL, fmtw(L"車両 (%d)  — 受信者: SteamID:間隔tick（小さいほど近い）", (int)rows.size()));
+    set(ID_VEH_LBL, fmtw(L"車両 (%d)  — I_src: 最密な更新間隔tick / 受信者: SteamID:間隔tick（小さいほど近い）", (int)rows.size()));
 }
 
 static void render_log() {
@@ -331,7 +331,7 @@ static void poll() {
         g_hooked = B(st.c_str(), "hooked"); g_relay = B(st.c_str(), "relay"); g_capturing = B(st.c_str(), "capturing");
         g_dllVersion = Sx(st.c_str(), "version");
         std::string p = ipc("peers.get"); if (ipc_ok(p)) g_peersJson = p;
-        std::string v = ipc("vehicles.get"); if (ipc_ok(v)) g_vehJson = v;
+        if (g_showVeh) { std::string v = ipc("vehicles.get"); if (ipc_ok(v)) g_vehJson = v; }
         if (!wasUp) refresh_config();          // came up: switch the settings view to live values
     } else {
         g_status.clear(); g_peersJson.clear(); g_vehJson.clear(); g_prevPeer.clear(); g_prevMs = 0; g_rateSend = g_rateInj = 0;
@@ -367,9 +367,10 @@ static void build_ui() {
     mk(L"STATIC", L"参加プレイヤー", 0, X, Y + 66, 400, 18, ID_PEERS_LBL, 0);
     HWND pl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 86, WID, 176, ID_PEERS_LV, 0, WS_EX_CLIENTEDGE);
     lv_cols(pl, { {L"SteamID", 150}, {L"状態", 60}, {L"送信/s", 90}, {L"同期追加/s", 90}, {L"受信/s", 90}, {L"解析率", 70}, {L"車両", 50}, {L"最終通信", 90} });
-    mk(L"STATIC", L"車両", 0, X, Y + 272, 600, 18, ID_VEH_LBL, 0);
+    mk(L"STATIC", L"車両", 0, X, Y + 272, 640, 18, ID_VEH_LBL, 0);
+    mk(L"BUTTON", L"車両一覧を表示（デバッグ用）", WS_TABSTOP | BS_AUTOCHECKBOX, X + WID - 220, Y + 270, 220, 22, ID_VEH_CHK, 0);
     HWND vl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 292, WID, 220, ID_VEH_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(vl, { {L"ID", 60}, {L"位置 (x, y, z)", 220}, {L"速度", 90}, {L"受信者数", 70}, {L"受信者 (SteamID:間隔)", 400} });
+    lv_cols(vl, { {L"ID", 60}, {L"位置 (x, y, z)", 220}, {L"I_src", 60}, {L"受信者数", 70}, {L"受信者 (SteamID:間隔)", 430} });
 
     // --- settings tab
     mk(L"STATIC", L"項目をクリックして値を編集し「適用」。適用した値は稼働中すぐ効きます。「iniに保存」で次回以降にも引き継がれます。",
@@ -419,6 +420,7 @@ static void on_command(int id) {
         if (r == injector::Failed) MessageBoxW(g_wnd, (L"注入に失敗しました:\n" + W(err)).c_str(), L"SWMultiSync", MB_ICONERROR);
         poll(); break; }
     case ID_RELAY_BTN: ipc("relay.set", g_relay ? "\"enabled\":false" : "\"enabled\":true"); poll(); break;
+    case ID_VEH_CHK: g_showVeh = IsDlgButtonChecked(g_wnd, ID_VEH_CHK) == BST_CHECKED; g_vehJson.clear(); poll(); break;
     case ID_CFG_APPLY: {
         wchar_t name[64], val[64]; GetWindowTextW(H(ID_CFG_NAME), name, 64); GetWindowTextW(H(ID_CFG_EDIT), val, 64);
         if (name[0] == L'（' || !val[0]) return;

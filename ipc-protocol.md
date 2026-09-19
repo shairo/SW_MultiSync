@@ -55,8 +55,9 @@ top. `connected` is false after the ch15 close byte or 5 s without any traffic t
 for over 10 minutes are dropped from the list (and from the DLL's table). Counters are per DLL lifetime.
 
 ### vehicles[] entry
-`id tick pos[3] rot[4] vel[3]|null feeds[{steamId,gap}]`
-`vel` is world units per tick (60 ticks/s), null when there is no confident velocity.
+`id tick pos[3] rot[4] srcGap feeds[{steamId,gap}]`
+`srcGap` is I_src: the EMA of ticks between fresh position samples across all native feeds
+(0 = unknown yet).
 `feeds` lists which recipients receive this vehicle natively and their native gap in ticks
 (smallest gap ≈ the peer sitting in / nearest to it).
 

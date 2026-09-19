@@ -395,14 +395,10 @@ static void write_vehicles(json::JsonW& w) {
     for (auto& kv : relay::g_veh) {
         const relay::Veh& v = kv.second;
         if (!v.has) continue;
-        double dt = (double)v.curT - v.prevT;
-        bool hasVel = v.prevT != 0 && dt > 0 && dt <= relay::g_cfg.gapOutlier;
         w.obj().kv("id", (unsigned)kv.first).kv("tick", (unsigned)v.curT)
          .key("pos").arr().num(v.cx).num(v.cy).num(v.cz).end()
-         .key("rot").arr().num((double)v.cq[0]).num((double)v.cq[1]).num((double)v.cq[2]).num((double)v.cq[3]).end();
-        if (hasVel) {   // world units per tick (60 ticks/s)
-            w.key("vel").arr().num((v.cx - v.px) / dt).num((v.cy - v.py) / dt).num((v.cz - v.pz) / dt).end();
-        } else w.key("vel").null();
+         .key("rot").arr().num((double)v.cq[0]).num((double)v.cq[1]).num((double)v.cq[2]).num((double)v.cq[3]).end()
+         .kv("srcGap", v.srcGap);   // I_src: EMA of ticks between fresh samples (0 = unknown)
         // which recipients see this vehicle, and how coarsely (native gap in ticks = distance proxy)
         w.key("feeds").arr();
         for (auto& g : relay::g_natGap) if (g.first.second == kv.first)
