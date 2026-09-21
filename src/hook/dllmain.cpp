@@ -304,6 +304,7 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                     if (w.first81 >= 0 && w.first81 + 52 <= blen) {
                         memcpy(&ps.px, body + w.first81 + 28, 8); memcpy(&ps.py, body + w.first81 + 36, 8); memcpy(&ps.pz, body + w.first81 + 44, 8);
                         ps.posMs = now;
+                        relay::observe_pose(sid, ps.px, ps.py, ps.pz);   // distance LOD input (relay.h nat_gap_of)
                     }
                 }
             }

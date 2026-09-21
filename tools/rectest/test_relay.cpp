@@ -57,10 +57,19 @@ int main(int argc, char** argv) {
         fread(&ch, 4, 1, f); fread(&flags, 4, 1, f); fread(&orig, 4, 1, f); fread(&stored, 4, 1, f);
         buf.resize(stored);
         if (stored) fread(buf.data(), 1, stored, f);
-        if (dir != 0 || ch != 0 || stored != orig || stored < 28) continue;
+        if (ch != 0 || stored != orig || stored < 22) continue;
         const uint8_t* b = buf.data();
         if (*reinterpret_cast<const uint32_t*>(b) != 0) continue;              // frag==0
         const uint8_t* body = b + 8; int blen = (int)stored - 8;
+        if (dir == 1) {                                                        // client stream: feed 0x2F poses (distance LOD)
+            if (*reinterpret_cast<const uint32_t*>(body + 4) == 3) {
+                rec::Walk cw = rec::walk_client(body, blen);
+                if (cw.full && cw.first81 >= 0 && cw.first81 + 52 <= blen)
+                    relay::observe_pose(sid, rdD(body + cw.first81 + 28), rdD(body + cw.first81 + 36), rdD(body + cw.first81 + 44));
+            }
+            continue;
+        }
+        if (stored < 28) continue;
         if (*reinterpret_cast<const uint32_t*>(body + 4) != 8) continue;       // msgType==8
         if (!rec::walk(body, blen).full) continue;                            // inject only on full
         uint32_t tick = *reinterpret_cast<const uint32_t*>(body + 8);

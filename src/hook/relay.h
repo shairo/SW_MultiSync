@@ -19,6 +19,7 @@
 #include <string>
 #include <cmath>
 #include <map>
+#include <array>
 #include <vector>
 #include <algorithm>
 #include <unordered_map>
@@ -45,6 +46,7 @@ struct Cfg {
     int    intervalMin = 5;    // finest relay cadence (ticks)
     int    intervalMax = 60;   // coarsest relay cadence (ticks)
     int    lodDenser   = 8;    // cost cap: relay a vehicle no denser than native_gap / lodDenser (0 = always I_src)
+    int    distLod     = 1;    // 1 = floor the measured native gap by the server's distance rule (recipient↔vehicle), so an approaching vehicle densifies before native catches up
     int    lag         = 5;    // target render lag Λ (ticks): the relayed vehicle sits this far behind reality
     int    horizonMax  = 30;   // cap on the prediction horizon (ticks) once the source stalls; never below 2·I + margin (limits turn overshoot)
     int    relayMinGap = 10;   // only relay when native gap exceeds this (else native is fine)
@@ -80,6 +82,7 @@ inline const CfgField kCfgFields[] = {
     {"intervalMin",     true,  &Cfg::intervalMin,     nullptr, false, "floor on I_src, the relay cadence (ticks)"},
     {"intervalMax",     true,  &Cfg::intervalMax,     nullptr, false, "ceiling on I_src (ticks)"},
     {"lodDenser",       true,  &Cfg::lodDenser,       nullptr, false, "cadence cost cap: no denser than native gap / this (0 = off)"},
+    {"distLod",         true,  &Cfg::distLod,         nullptr, false, "1 = native gap = min(measured, distance rule 0.1*d-6) so approaching vehicles densify early"},
     {"lag",             true,  &Cfg::lag,             nullptr, false, "target render lag (ticks)"},
     {"horizonMax",      true,  &Cfg::horizonMax,      nullptr, false, "cap on prediction horizon (ticks)"},
     {"relayMinGap",     true,  &Cfg::relayMinGap,     nullptr, false, "append only when native gap exceeds this (ticks); below it native records are still rewritten"},
@@ -242,6 +245,7 @@ inline std::map<std::pair<uint64_t, uint32_t>, Sent>     g_sent;     // (peer,ve
 inline std::map<std::pair<uint64_t, uint32_t>, uint32_t> g_natLast; // (peer,veh) -> last NATIVE receipt tick
 inline std::map<std::pair<uint64_t, uint32_t>, uint32_t> g_natGap;  // (peer,veh) -> last native gap (distance proxy)
 inline std::map<std::pair<uint64_t, uint32_t>, uint32_t> g_natEta;  // (peer,veh) -> last native record's ETA (server's next-send time)
+inline std::map<uint64_t, std::array<double, 3>> g_peerPos;        // recipient's last client 0x2F world position (distance LOD)
 inline std::map<uint64_t, uint32_t> g_peerProc;                    // per-recipient last world tick we injected into
 inline std::map<uint64_t, uint32_t> g_peerWin;                     // per-recipient budget window index
 inline std::map<uint64_t, long>     g_peerBytes;                   // per-recipient bytes used this window
@@ -357,6 +361,42 @@ inline void predict_quat(const Veh& v, uint32_t eta, float out[4]) {
     for (int i = 0; i < 4; i++) out[i] = (float)(e[i] * inv);
 }
 
+// Recipient position from the client 0x2F record (passive, recv path).
+inline void observe_pose(uint64_t peer, double x, double y, double z) { g_peerPos[peer] = { x, y, z }; }
+
+// The server's own distance LOD, measured on session_20260919_143912_627 (protocol/sync.md): the
+// native 0x81 spacing to a recipient d metres from body0 is ≈ 0.1·d − 6 ticks, floor 5, cap 720,
+// independent of speed. Decided per send, so the server keeps a long promise while a vehicle closes in.
+inline uint32_t native_gap_at(double d) {
+    double g = 0.1 * d - 6.0;
+    if (g < 5) g = 5; if (g > 720) g = 720;
+    return (uint32_t)(g + 0.5);
+}
+
+// Effective native gap for (recipient, V): the measured gap (what the server last did) floored by the
+// distance rule evaluated at the predicted vehicle position now and at the next promise — the smaller
+// distance wins. min() can only densify: an approaching vehicle gets the cadence the server WILL use
+// once it re-decides, instead of the stale long gap; a receding one keeps the measured gap until the
+// next native send. Unknown measured gap (never received natively) is returned as is.
+inline uint32_t nat_gap_of(const Veh& v, uint64_t peer, uint32_t V, uint32_t tick) {
+    auto git = g_natGap.find(std::make_pair(peer, V));
+    uint32_t g = git == g_natGap.end() ? 0 : git->second;
+    if (!g_cfg.distLod || g == 0 || !v.has) return g;
+    auto pit = g_peerPos.find(peer);
+    if (pit == g_peerPos.end()) return g;
+    const std::array<double, 3>& p = pit->second;
+    auto dist_at = [&](uint32_t t) {
+        double ex, ey, ez; predict(v, t, ex, ey, ez);
+        double dx = ex - p[0], dy = ey - p[1], dz = ez - p[2];
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+    double d = dist_at(tick);
+    double d1 = dist_at(tick + (uint32_t)interval_of(v, g) + kRefreshMargin);
+    if (d1 < d) d = d1;
+    uint32_t gd = native_gap_at(d);
+    return gd < g ? gd : g;
+}
+
 // A vehicle is "managed" for recipient B when we should take over its sync to B: we have a fresh
 // source pose with a velocity, B is DISTANT from V (native gap above relayMinGap), AND the source is
 // denser than B's own feed. The last gate is what makes the relay add information: the server's
@@ -398,7 +438,7 @@ inline void fill_pose(uint8_t* r, int avail, const Veh& v, uint32_t targetTick) 
 // the server's own next-send time instead, so the client keeps gliding until native takes over.
 inline void promise_of(const Veh& v, uint64_t peer, uint32_t V, uint32_t tick, uint32_t& eta, uint32_t& target) {
     auto key = std::make_pair(peer, V);
-    int I = interval_of(v, g_natGap[key]);
+    int I = interval_of(v, nat_gap_of(v, peer, V, tick));
     eta = tick + (uint32_t)I + kRefreshMargin;
     uint32_t age = tick - v.curT;
     if (age + (uint32_t)I > (uint32_t)g_cfg.stale) {                            // final bridge to native
@@ -491,12 +531,12 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
         bool due = it == g_sent.end();
         if (!due) {
             const Sent& sn = it->second;
-            int I = interval_of(v, g_natGap[key]);
+            int I = interval_of(v, nat_gap_of(v, peer, V, tick));
             due = tick - sn.at >= (uint32_t)I                                      // cadence elapsed: fresh sample or dead-reckon
                   || (int32_t)(sn.eta - tick) <= (int32_t)kRefreshMargin;         // (pass-through native promise expiring)
         }
         if (!due) continue;
-        cand.push_back(std::make_pair(g_natGap[key], V));
+        cand.push_back(std::make_pair(nat_gap_of(v, peer, V, tick), V));
     }
     std::sort(cand.begin(), cand.end());
 
