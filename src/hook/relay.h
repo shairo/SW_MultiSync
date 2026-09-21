@@ -48,7 +48,9 @@ struct Cfg {
     int    lodDenser   = 8;    // cost cap: relay a vehicle no denser than native_gap / lodDenser (0 = always I_src)
     int    distLod     = 1;    // 1 = floor the measured native gap by the server's distance rule (recipient↔vehicle), so an approaching vehicle densifies before native catches up
     int    lag         = 5;    // target render lag Λ (ticks): the relayed vehicle sits this far behind reality
-    int    horizonMax  = 30;   // cap on the prediction horizon (ticks) once the source stalls; never below 2·I + margin (limits turn overshoot)
+    int    horizonMax  = 300;  // cap on the prediction horizon (ticks) once the source stalls; never below 2·I + margin. Keep ≥ stale: a
+                               // lower cap pins successive targets to one point and the recipient sees the vehicle FREEZE until the next sample
+                               // (missile 132 → peer 8477, session_20260922_023854_351: source gap 356 vs cap 123 froze it at closest approach)
     int    relayMinGap = 10;   // only relay when native gap exceeds this (else native is fine)
     double srcRatio    = 0.5;  // relay only when the source samples at most this fraction of the recipient's native gap
     int    stale       = 300;   // don't relay if freshest source older than this (ticks)

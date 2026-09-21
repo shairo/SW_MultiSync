@@ -18,8 +18,11 @@ static double rdD(const uint8_t* p){ double v; memcpy(&v,p,8); return v; }
 static float  rdF(const uint8_t* p){ float v; memcpy(&v,p,4); return v; }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { printf("usage: test_relay <file.swcap> [config.ini]\n"); return 1; }
-    if (argc >= 3) {
+    if (argc < 2) { printf("usage: test_relay <file.swcap> [config.ini] [--trace <peer> <veh>]\n"); return 1; }
+    // --trace: print every 0x81 for (peer,veh) as the recipient would see it after injection
+    uint64_t trPeer = 0; uint32_t trVeh = 0;
+    for (int i = 2; i + 2 < argc; i++) if (!strcmp(argv[i], "--trace")) { trPeer = strtoull(argv[i+1], nullptr, 10); trVeh = (uint32_t)strtoul(argv[i+2], nullptr, 10); }
+    if (argc >= 3 && strcmp(argv[2], "--trace") != 0) {
         int n = relay::load_config_file(argv[2]);
         if (n < 0) { printf("cannot open config %s\n", argv[2]); return 1; }
         const relay::Cfg& c = relay::g_cfg;
@@ -104,6 +107,29 @@ int main(int argc, char** argv) {
                     }
                     if (o + 14 < blen && body[o+14] == 1 && o + 31 + 24 <= blen)
                         lastNativePos[V] = { rdD(body+o+31), rdD(body+o+39), rdD(body+o+47) };
+                }
+                o += L;
+            }
+        }
+        if (trPeer && sid == trPeer) {
+            const uint8_t* tb = newcub > 0 ? out.data() + 8 : body; int tl = newcub > 0 ? newcub - 8 : blen;
+            int c = (int)rec::U32(tb, tl, 16), o = 20;
+            for (int i = 0; i < c && o < tl; i++) {
+                uint32_t tag = rec::U32(tb, tl, o); int L = rec::decode_len(tb, tl, o); if (L <= 0) break;
+                if (tag == 0x81 && rec::U32(tb, tl, o + 4) == trVeh && o + 14 < tl && tb[o+14] == 1) {
+                    uint32_t E = rec::U32(tb, tl, o + 8);
+                    bool nat = nativeVehEta.count(trVeh) > 0;
+                    double x = rdD(tb+o+31), y = rdD(tb+o+39), z = rdD(tb+o+47);
+                    static double lx = 0, ly = 0, lz = 0; static uint32_t lt = 0;
+                    double mv = lt ? std::sqrt((x-lx)*(x-lx)+(y-ly)*(y-ly)+(z-lz)*(z-lz)) : 0;
+                    auto pit = relay::g_peerPos.find(sid);
+                    double d = pit == relay::g_peerPos.end() ? -1 : std::sqrt((x-pit->second[0])*(x-pit->second[0])+(y-pit->second[1])*(y-pit->second[1])+(z-pit->second[2])*(z-pit->second[2]));
+                    const relay::Veh& v = relay::g_veh[trVeh];
+                    printf("  [TR] tick=%u %s eta=+%d src=%u(age %d, srcGap %.0f) natGap=%u I=%d mg=%d pos=(%.0f,%.0f,%.0f) moved=%.0f dist=%.0f\n",
+                           tick, nat ? "NATIVE" : "APPEND", (int)((int64_t)E - tick), v.curT, (int)(tick - v.curT), v.srcGap,
+                           relay::g_natGap[std::make_pair(sid, trVeh)], relay::interval_of(v, relay::nat_gap_of(v, sid, trVeh, tick)),
+                           (int)relay::managed(sid, trVeh, tick), x, y, z, mv, d);
+                    lx = x; ly = y; lz = z; lt = tick;
                 }
                 o += L;
             }
