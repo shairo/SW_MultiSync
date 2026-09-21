@@ -43,7 +43,8 @@ the few types/offsets we touch). The analyzer `tools/swcap` is C# / net10.0
   `capture`, `ipcPort`, `autoInject`) are edited on its startup tab by reading/writing swhook.ini
   directly via `relay.h`; everything else goes through IPC.
 - `tools/swcap/` — offline analyzer; `tools/rectest/` — `test_rec` / `test_relay` apply `rec.h` /
-  `relay.h` to real captures (walk failures must stay 0 after any relay change).
+  `relay.h` to real captures (walk failures must stay 0 after any relay change); `test_dist` pairs
+  0x81 dETA with recipient↔vehicle distance (native distance LOD, see protocol/sync.md).
 - `build.bat` — builds DLL, inject.exe, swctl.exe, SWMultiSync.exe.
 - `package.bat` — build + stage `dist\SW_MultiSync_v<ver>\` + zip. Ships GUI, CLI, DLL, ini (with
   `relay=1` forced), `packaging/README_*.txt`, `ipc-protocol.md`. Version = `src/common/version.h`.

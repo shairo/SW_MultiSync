@@ -23,6 +23,34 @@ future ETA). **Near vehicle: delta = +5 for all records** (sync interval = 5 tic
 **Distant: delta 5 … ~687**, matching the per-(peer,vehicle) sync spacing → `time = tick + interval`.
 Tick rate ≈ **62.5/s**. Distant deltas of ~300 ticks ≈ 5 s = the distant-vehicle lag the relay fixes.
 
+**Distance LOD (`tools/rectest/test_dist.cpp`, session_20260919_143912_627: 5 peers, 64k 0x81, both
+directions 100 % walked):** pairing each 0x81's `dETA = time − tick` with the recipient's distance to
+body0 (recipient position = that peer's latest client 0x2F world pos) gives a clean, speed-independent
+rule:
+
+| dist [m] | dETA p50 | | dist [m] | dETA p50 |
+|---|---|---|---|---|
+| 0–110 | 5 | | 500–750 | 56 |
+| 120–140 | 7 | | 750–1000 | 85 |
+| 200–220 | 15 | | 1000–1500 | 125 |
+| 280–300 | 23 | | 2000–3000 | 225 |
+| 400–500 | 40 | | ≥5000 | 720 (cap) |
+
+```
+dETA ≈ clamp(0.1·d − 6, 5, 720)      ticks   (1 tick per 10 m beyond ~110 m; 12 s ceiling)
+```
+Fit residual over 200–3000 m: p10/p50/p90 = −1.8 / +0.5 / +13 ticks (the +13 tail is the approach to the
+720 cap). Speed does not enter (dETA/d median 0.088 for >50 m/s vs 0.090 for <5 m/s). The interval is
+decided per send from the distance *at that send*, so a vehicle closing fast keeps its long promise
+until the next send — the motivation for the relay's distance-aware target interval.
+
+**Promise-keeping:** the real gap exceeded the previous record's dETA by >2 ticks in only 376 / 63 459
+consecutive pairs (0.6 %), all with dETA = 5. 325 of them are vehicles at rest (body0 moved < 5 cm — the
+server evidently skips the send when nothing changed); the rest cluster in two short bursts where the
+server tick itself ran ~25 % slow (171 ms real for 8 ticks). No correlation with the recipient or the
+vehicle crossing a 1 km tile boundary (0 of 376 with boundaries at ±500 m; 6 with boundaries at 0 m vs a
+6 % base rate).
+
 **Relay time-rewrite:** when forwarding a fresher 0x81 into recipient B's stream, set
 `time = B_message.tick + desiredInterval` (e.g. 5) so B interpolates over a short future window.
 
