@@ -454,6 +454,10 @@ static void set_debug_ui(bool on) {
         if (TabCtrl_GetCurSel(g_tab) == kDebugTab) { TabCtrl_SetCurSel(g_tab, 0); show_tab(0); }
         SendMessageW(g_tab, TCM_DELETEITEM, kDebugTab, 0);
     }
+    // Adding/removing an item repaints the whole tab control over the page controls (they are its
+    // siblings, below it in z-order), so repaint the current page on top again.
+    int cur = TabCtrl_GetCurSel(g_tab);
+    if (cur >= 0 && cur < kTabs) for (HWND c : g_tabCtl[cur]) RedrawWindow(c, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
 }
 
 static void build_ui() {
