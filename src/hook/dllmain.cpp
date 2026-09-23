@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <cstdarg>
 #include <cstring>
-#include <cctype>
 #include <string>
 
 #include <vector>
@@ -307,14 +306,10 @@ static int32_t tile_of(double c) { return (int32_t)floor((c + 500.0) / 1000.0); 
 // per-peer cooldown; every use is logged and marked. Both variants stay until one proves enough.
 constexpr uint64_t kUnstuckCooldownMs = 5000;
 static std::map<uint64_t, uint64_t> g_unstuckMs;              // sid -> last accepted use
-// 1 = "?unstuck", 2 = "?unstuck2", 0 = neither (case-insensitive, surrounding blanks ignored)
+// 1 = "?unstuck", 2 = "?unstuck2", 0 = anything else (exact match: case and blanks count)
 static int unstuck_cmd(const uint8_t* s, int n) {
-    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
-    while (n > 0 && (s[0] == ' ' || s[0] == '\t')) { s++; n--; }
-    static const char kCmd[] = "?unstuck"; const int k = (int)sizeof(kCmd) - 1;
-    if (n < k || n > k + 1) return 0;
-    for (int i = 0; i < k; i++) if (tolower(s[i]) != kCmd[i]) return 0;
-    return n == k ? 1 : (s[k] == '2' ? 2 : 0);
+    auto is = [&](const char* c) { return n == (int)strlen(c) && !memcmp(s, c, n); };
+    return is("?unstuck") ? 1 : is("?unstuck2") ? 2 : 0;
 }
 static void put_chat(std::vector<uint8_t>& v, const std::string& text, const std::string& from) {   // SEND 0x01
     put_u32(v, 0x01);
