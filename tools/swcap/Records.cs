@@ -168,7 +168,11 @@ public static class Records
             case 0x64: // CHARACTER DEATH broadcast (server reply to client 0x37): tag + u32 charId + u32 46 + u32 21 + u32 payloadLen + payload (component-value entries: u8 1 · u32 width · value[width] · u8 0 · u32 idx). 20 + len. session_20260917_002237 (70 B). recordCount counts it as 2 (compound, like 0x38/0x96).
                 r.Length = 20 + (int)U32(b, off + 16); r.Status = off + r.Length <= b.Length && r.Length >= 20 ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"char={U32(b, off + 4)} payload={U32(b, off + 16)}"; break;
-            // 0x06 = CHARACTER FULL STATE on player join (peer_id, charId, appearance colours, inventory, name…) — large & variable, NOT decoded yet (session_20260913_002757 seq 8268).
+            case 0x06: // CHARACTER FULL STATE on player join: tag + u16 peer_id + u32 charId + u32 len + payload[len] = 14 + len. The payload is what a 0x4D spawn of that character carries. VERIFIED (session_20260923_182705_304; also 002757 seq 8268, walkfail_20260919_125459)
+                r.Length = 14 + (int)U32(b, off + 10); r.Status = off + r.Length <= b.Length && r.Length >= 14 ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"peer={U16(b, off + 4)} char={U32(b, off + 6)} payload={U32(b, off + 10)}"; break;
+            case 0x0A: // join sequence: tag + u8 0, between the 0x06 character dump and the 0x88 settings. VERIFIED (same captures)
+                r.Length = 5; r.Status = off + 5 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
             case 0x65: // HEAL applied (first-aid kit): tag + u32 charId + f32 amount (50.0) + u8. Mirror of client 0x38; emitted with the 0x29 primary mirror of item 11. VERIFIED (session_20260917_002831)
                 r.Length = 13; r.Status = off + 13 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"char={U32(b, off + 4)} amount={F32(b, off + 8):F1}"; break;

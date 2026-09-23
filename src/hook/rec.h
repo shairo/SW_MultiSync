@@ -52,6 +52,7 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x62: L = 12; break;   // load/purchase companion (u32 20000, u32 5)
         case 0x67: L = 25; break;   // character vitals (hp)
         case 0x88: L = 37; break;   // game settings bool[33]
+        case 0x0A: L = 5;  break;   // join sequence: tag + u8 0, between the 0x06 character dump and the 0x88 settings
         case 0x94: L = 8;  break;
         case 0x4F: L = 8;  break;
         case 0x0B: L = 38; break;
@@ -155,7 +156,9 @@ inline int decode_len(const uint8_t* b, int len, int off) {
             }
             L = p - off; break;
         }
-        // 0x06 (character full state on player join) has no rule yet — walk stops there by design.
+        // 0x06 = character full state on player join: tag · u16 peer_id · u32 charId · u32 len · payload[len];
+        // the payload is the same one a 0x4D spawn of that character carries (session_20260923_182705_304).
+        case 0x06: L = 14 + (int)U32(b, len, off + 10); break;
         default: return -1;
     }
     if (L <= 0 || off + L > len) return -1;

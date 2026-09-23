@@ -64,6 +64,21 @@ vehicle: the 78 KB **RECV ch1 type=14** is the client sending its vehicle file u
 Client-side lengths (`protocol/client.md`): 0x1B and 0x29 are both `tag+3 · u32 vehId` (8 B); the old
 reading of 0x1B as "u32 ×2" was two adjacent 0x1B records.
 
+## Player join message (`session_20260923_182705_304`) — 100 % walked since 2026-09-23
+The first msgType=8 to a joining client (2 KB, 62 records; the tile/world bulk msgType=9 follows) runs:
+```
+0x03  player joined   tag · u16 peer_id · u16 n · name · u16 0 · u8 1
+0x7B  notify          "Player Joined" / "<name> has joined the game" (+ u32)
+0x06  character dump  tag · u16 peer_id · u32 charId · u32 len · payload[len]  (14 + len; same payload as a 0x4D spawn)
+0x0A  (5 B)           tag · u8 0
+0x88  settings        bool[33]
+0x26 × n              inventory slots of that character
+…
+0x45 × 25             the 5×5 tile ring around the spawn, trailing u8 = purchased (reference.md)
+```
+0x06 was the walker's long-standing stop tag on every join (002757 seq 8268, walkfail_20260919_125459): the
+records behind it — including that first tile ring — were invisible until its length rule landed.
+
 ## Object lifecycle  ✅ CONFIRMED (`session_20260915_012132_375_coal`, coal spawn/collect)
 
 | event | record |
