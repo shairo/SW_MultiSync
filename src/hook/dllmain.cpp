@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdarg>
 #include <cstring>
+#include <cctype>
 #include <string>
 
 #include <vector>
@@ -291,6 +292,51 @@ struct Nudge {
 static std::map<uint64_t, Nudge> g_nudge;                     // under g_cs; consumed by the next type=8 send
 static void put_u32(std::vector<uint8_t>& v, uint32_t x) { v.insert(v.end(), reinterpret_cast<uint8_t*>(&x), reinterpret_cast<uint8_t*>(&x) + 4); }
 constexpr uint64_t kReloadGapMs = 500;                        // 0x46 → 0x45 spacing for the reload probe (a few ticks apart)
+static int32_t tile_of(double c) { return (int32_t)floor((c + 500.0) / 1000.0); }   // 1 km grid, see protocol/reference.md
+
+// ---- player self-help: `?unstuck` / `?unstuck2` ----
+// For the "ghost chunk" stall: the client stops simulating the world on entering a tile while its
+// network thread keeps running (tools/swcap/README.md). `?` lines go to addons and never reach the
+// chat, so the game ignores these and the DLL — which only watches the client 0x02 — queues, on the
+// same g_nudge path as debug.nudge, for the tile under the player's last pose: `?unstuck` a 0x45 load,
+// `?unstuck2` a 0x46 unload then the 0x45 kReloadGapMs later (forced reload); plus a 0x01 chat line to
+// that player alone so they see it was taken. Always on (players help themselves, no admin needed);
+// per-peer cooldown; every use is logged and marked. Both variants stay until one proves enough.
+constexpr uint64_t kUnstuckCooldownMs = 5000;
+static std::map<uint64_t, uint64_t> g_unstuckMs;              // sid -> last accepted use
+// 1 = "?unstuck", 2 = "?unstuck2", 0 = neither (case-insensitive, surrounding blanks ignored)
+static int unstuck_cmd(const uint8_t* s, int n) {
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
+    while (n > 0 && (s[0] == ' ' || s[0] == '\t')) { s++; n--; }
+    static const char kCmd[] = "?unstuck"; const int k = (int)sizeof(kCmd) - 1;
+    if (n < k || n > k + 1) return 0;
+    for (int i = 0; i < k; i++) if (tolower(s[i]) != kCmd[i]) return 0;
+    return n == k ? 1 : (s[k] == '2' ? 2 : 0);
+}
+static void put_chat(std::vector<uint8_t>& v, const std::string& text, const std::string& from) {   // SEND 0x01
+    put_u32(v, 0x01);
+    uint16_t n = (uint16_t)text.size(); v.push_back((uint8_t)n); v.push_back((uint8_t)(n >> 8)); v.insert(v.end(), text.begin(), text.end());
+    uint16_t m = (uint16_t)from.size(); v.push_back((uint8_t)m); v.push_back((uint8_t)(m >> 8)); v.insert(v.end(), from.begin(), from.end());
+}
+static void on_unstuck(uint64_t sid, const stats::Peer& ps, int mode, uint64_t now) {
+    uint64_t& last = g_unstuckMs[sid];
+    if (last && now - last < kUnstuckCooldownMs) { logf("== unstuck ignored (cooldown): peer=%llu ==\n", (unsigned long long)sid); return; }
+    if (!ps.posMs) { logf("== unstuck ignored (no pose yet): peer=%llu ==\n", (unsigned long long)sid); return; }
+    last = now;
+    int32_t tx = tile_of(ps.px), tz = tile_of(ps.pz);
+    bool reload = mode == 2;
+    Nudge nd; nd.kind = reload ? "unstuck/0x46" : "unstuck/0x45";
+    put_u32(nd.recs, reload ? 0x46 : 0x45); put_u32(nd.recs, (uint32_t)tx); put_u32(nd.recs, (uint32_t)tz);
+    if (!reload) nd.recs.push_back(0);
+    char msg[96]; _snprintf_s(msg, _TRUNCATE, "reloading tile (%d, %d)", tx, tz);
+    put_chat(nd.recs, msg, "[SW_MultiSync]");
+    nd.count = 2; nd.reload = reload; nd.tx = tx; nd.tz = tz;
+    g_nudge[sid] = std::move(nd);
+    uint64_t mk = write_marker();
+    logf("== unstuck: peer=%llu name=\"%s\" pos=(%.1f,%.1f,%.1f) tile=(%d,%d) mode=%d mark=%llu ==\n", (unsigned long long)sid,
+         ps.name.c_str(), ps.px, ps.py, ps.pz, tx, tz, mode, (unsigned long long)mk);
+    logflush();
+}
 
 // Ends a hold (called under g_cs) and logs what was dropped.
 static void hold_end(std::map<uint64_t, Hold>::iterator it, const char* why) {
@@ -415,7 +461,7 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
             if (owned) free(owned);
             owned = s; outp = s; outcub = nc;
             EnterCriticalSection(&g_cs);
-            logf("== debug.nudge %s delivered: peer=%llu tick=%u +%d records (%u B) ==\n", nudge.kind.c_str(), (unsigned long long)sid, tick, nudge.count, (unsigned)nudge.recs.size());
+            logf("== nudge %s delivered: peer=%llu tick=%u +%d records (%u B) ==\n", nudge.kind.c_str(), (unsigned long long)sid, tick, nudge.count, (unsigned)nudge.recs.size());
             logflush();
             if (nudge.reload) {                               // second half of "reload": the 0x45 a few ticks later
                 Nudge f; f.kind = "reload/0x45"; f.notBeforeMs = GetTickCount64() + kReloadGapMs;
@@ -469,8 +515,11 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                         int L = rec::decode_client_len(body, blen, off); if (L <= 0) break;
                         if (body[off] == 0x1B) freeze::on_defreq(sid, rec::U32(body, blen, off + 4), now);
                         else if (body[off] == 0x29) freeze::on_defack(sid, rec::U32(body, blen, off + 4), now);
-                        else if (body[off] == 0x02)     // chat line: u16 n · text (L = 6 + n, walk-checked)
-                            on_chat_line(sid, body + off + 6, (int)rec::U16(body, blen, off + 4));
+                        else if (body[off] == 0x02) {   // chat line: u16 n · text (L = 6 + n, walk-checked)
+                            int tn = (int)rec::U16(body, blen, off + 4);
+                            on_chat_line(sid, body + off + 6, tn);
+                            if (int mode = unstuck_cmd(body + off + 6, tn)) on_unstuck(sid, ps, mode, now);
+                        }
                         else if (body[off] == 0x34) {   // heartbeat: u32 clientTick · u32 0 · u32 clientTps · u32 framesBehind
                             ps.cliTick = rec::U32(body, blen, off + 4); ps.cliTps = rec::U32(body, blen, off + 12);
                             ps.cliBehind = rec::U32(body, blen, off + 16); ps.hbMs = now;
@@ -758,7 +807,7 @@ static std::string ipc_handle(const std::string& line) {
             } else if (kind == "tile" || kind == "unload" || kind == "reload") {
                 if (!havePose && !(hx && hz)) err = "no pose known for peer; pass x,z";
                 else {
-                    int32_t tx = (int32_t)floor((x + 500.0) / 1000.0), tz = (int32_t)floor((z + 500.0) / 1000.0);   // 1 km grid, see protocol/reference.md
+                    int32_t tx = tile_of(x), tz = tile_of(z);
                     if (json::get_num(line.c_str(), "tileX", x)) tx = (int32_t)x;
                     if (json::get_num(line.c_str(), "tileZ", z)) tz = (int32_t)z;
                     if (kind == "tile") { put32(0x45); put32((uint32_t)tx); put32((uint32_t)tz); nd.recs.push_back(0); }
