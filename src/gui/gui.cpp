@@ -67,8 +67,12 @@ enum {
     ID_ST_NOTE, ID_ST_DLL, ID_ST_PORT_LBL, ID_ST_PORT, ID_ST_RELAY, ID_ST_SAVE, ID_ST_INI,
     // log tab
     ID_LOGPKT_CHK, ID_DUMPWF_CHK, ID_CAP_AUTO, ID_DUMPMAX_LBL, ID_DUMPMAX, ID_DUMPMAX_APPLY, ID_CAP_TXT, ID_CAP_START, ID_CAP_STOP, ID_CAP_MARK, ID_CAP_COPY, ID_OPEN_DIR, ID_LOG_TXT, ID_LOG_NOTE,
+    // startup tab: developer switch; debug tab (shown only with debugUi=1 in swhook.ini)
+    ID_ST_DEBUG, ID_DBG_NOTE, ID_DBG_LV, ID_DBG_LBL, ID_DBG_HOLD_LBL, ID_DBG_HOLD_MS, ID_DBG_HOLD, ID_DBG_RELEASE, ID_DBG_NUDGE_LBL, ID_DBG_NUDGE_TP, ID_DBG_NUDGE_TILE, ID_DBG_NUDGE_UNLOAD, ID_DBG_NUDGE_RELOAD, ID_DBG_DLL_UNLOAD, ID_DBG_RESULT, ID_DBG_HELP,
 };
-static const int kTabs = 4;
+static const int kTabs = 5;                  // the last page is the debug tab, present in the tab control only when g_debugUi
+static const int kDebugTab = 4;
+static bool g_debugUi = false;
 static std::vector<HWND> g_tabCtl[kTabs];    // controls per tab page
 static HWND g_tab;
 static HWND H(int id) { return GetDlgItem(g_wnd, id); }
@@ -193,6 +197,7 @@ static void cfg_set(const std::string& key, double val) {
 // (ipcPort tells us where to connect) and must be editable while the server is down.
 // Write one startup-only key straight to swhook.ini (these never go through the DLL: it reads them
 // once at injection). Re-reads the file first so nothing saved by another tool is clobbered.
+static void set_debug_ui(bool on);
 static void ini_set(const char* key, double val) {
     relay::g_cfg = relay::Cfg();
     relay::load_config_file(g_iniPath.c_str());
@@ -206,6 +211,8 @@ static void startup_load() {
     if (!g_dllUp) g_port = relay::g_cfg.ipcPort;   // while connected, keep talking to the port the DLL actually uses
     g_autoInject = relay::g_cfg.autoInject != 0;
     CheckDlgButton(g_wnd, ID_AUTO_CHK, g_autoInject ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(g_wnd, ID_ST_DEBUG, relay::g_cfg.debugUi ? BST_CHECKED : BST_UNCHECKED);
+    set_debug_ui(relay::g_cfg.debugUi != 0);
     CheckDlgButton(g_wnd, ID_ST_RELAY, relay::g_cfg.relay ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_wnd, ID_CAP_AUTO, relay::g_cfg.capture ? BST_CHECKED : BST_UNCHECKED);
     SetWindowTextW(H(ID_ST_PORT), fmtw(L"%d", g_port).c_str());
@@ -261,6 +268,56 @@ static void render_status() {
         t8 ? 100.0 * full / t8 : 0, full, t8, t8 - full, walk ? N(walk, "dumped") : 0, N(o, "peerCount"), N(o, "vehicleCount")));
 }
 
+// Freeze detector verdict for one peers[] entry (freeze{} object, see ipc-protocol.md). Short form for
+// the status table, long form (with the unacked vehicle ids) for the debug tab.
+static std::wstring freeze_text(const char* p, double now, bool detail = false) {
+    const char* fz = json::find_value(p, "freeze");
+    if (!fz) return L"-";
+    double since = N(fz, "frozenSinceMs"), ev = N(fz, "events");
+    std::wstring t;
+    if (since > 0) t = fmtw(L"凍結? %hs %.0f秒", Sx(fz, "reason").c_str(), (now - since) / 1000);
+    else if (ev > 0) t = fmtw(L"正常（過去 %.0f 回）", ev);
+    else t = L"正常";
+    if (!detail) return t;
+    std::wstring ids;
+    json::for_each_elem(json::find_value(fz, "pendingDefs"), [&](const char* e) { if (!ids.empty()) ids += L","; ids += fmtw(L"%.0f", atof(e)); });
+    return t + fmtw(L"  静止 %.1f秒  未ack %.1f秒  車両 %.0f  要求/ack %.0f/%.0f", N(fz, "poseStaticMs") / 1000, N(fz, "unackedMs") / 1000,
+                    N(fz, "poseVeh"), N(fz, "defReqs"), N(fz, "defAcks")) + (ids.empty() ? L"" : L"  未ack定義 [" + ids + L"]");
+}
+
+static void render_debug() {
+    if (!g_debugUi) return;
+    const char* o = g_peersJson.c_str();
+    double now = N(o, "nowMs");
+    std::vector<std::vector<std::wstring>> rows;
+    json::for_each_elem(json::find_value(o, "peers"), [&](const char* p) {
+        uint64_t id = 0; json::get_u64(p, "steamId", id);
+        double ago = (now - N(p, "lastSeenMs")) / 1000;
+        if (ago > kPeerDropSec) return;
+        double pos[3] = {0,0,0}; bool hasPos = json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3;
+        rows.push_back({ W(std::to_string(id)), hasPos ? fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-", freeze_text(p, now, true) });
+    });
+    lv_fill(H(ID_DBG_LV), rows);
+    bool sel = ListView_GetNextItem(H(ID_DBG_LV), -1, LVNI_SELECTED) >= 0;
+    for (int id : { ID_DBG_HOLD, ID_DBG_RELEASE, ID_DBG_NUDGE_TP, ID_DBG_NUDGE_TILE, ID_DBG_NUDGE_UNLOAD, ID_DBG_NUDGE_RELOAD }) EnableWindow(H(id), g_dllUp && g_hooked && sel);
+    EnableWindow(H(ID_DBG_DLL_UNLOAD), g_dllUp);
+    set(ID_DBG_LBL, g_dllUp ? fmtw(L"プレイヤー (%d) — 操作対象を選択  ／  凍結検知 合計 %.0f 件", (int)rows.size(), N(g_status.c_str(), "freezeEvents")) : L"プレイヤー — DLL 未接続");
+}
+// The selected debug-tab peer as a JSON fragment for debug.* requests ("" when nothing is selected).
+static std::string debug_peer() {
+    int i = ListView_GetNextItem(H(ID_DBG_LV), -1, LVNI_SELECTED);
+    if (i < 0) return "";
+    wchar_t id[32]; lv_get(H(ID_DBG_LV), i, 0, id, 32);
+    char a[32]; WideCharToMultiByte(CP_UTF8, 0, id, -1, a, 32, nullptr, nullptr);
+    return std::string("\"peer\":") + a;
+}
+static void debug_cmd(const char* cmd, const std::string& extra) {
+    std::string peer = debug_peer();
+    if (peer.empty()) { set(ID_DBG_RESULT, L"プレイヤーを選択してください"); return; }
+    std::string r = ipc(cmd, peer + extra);
+    set(ID_DBG_RESULT, W(std::string(cmd) + " -> " + (r.empty() ? "(no reply)" : r)));
+}
+
 static void render_peers() {
     const char* o = g_peersJson.c_str();
     double now = N(o, "nowMs"); double dt = (g_prevMs && now > g_prevMs) ? (now - g_prevMs) / 1000.0 : 0;
@@ -281,7 +338,7 @@ static void render_peers() {
         rows.push_back({ W(ids), conn ? L"接続中" : L"切断", bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
                          fmtw(L"%.1f%%", t8 ? 100.0 * wf / t8 : 0), fmtw(L"%.1f%%", t3 ? 100.0 * rwf / t3 : 0),
                          hasPos ? fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-",
-                         fmtw(L"%.0f", N(p, "vehicles")), fmtw(L"%.0f", N(p, "tickRewinds")), fmtw(L"%.0f 秒前", ago) });
+                         fmtw(L"%.0f", N(p, "vehicles")), fmtw(L"%.0f", N(p, "tickRewinds")), fmtw(L"%.0f 秒前", ago), freeze_text(p, now) });
     });
     if (dt) { g_rateSend = (totS - g_prevTotal.sendBytes) / dt; g_rateInj = (totI - g_prevTotal.injBytes) / dt; }
     g_prevTotal = { totS, totI, 0 }; g_prevMs = now;
@@ -357,12 +414,23 @@ static void poll() {
         g_status.clear(); g_peersJson.clear(); g_vehJson.clear(); g_prevPeer.clear(); g_prevMs = 0; g_rateSend = g_rateInj = 0;
         if (wasUp) refresh_config();           // went down: fall back to the ini view
     }
-    render_header(); render_peers(); render_vehicles(); render_status(); render_log();
+    render_header(); render_peers(); render_vehicles(); render_status(); render_log(); render_debug();
 }
 
 // ---------------------------------------------------------------- UI build
 static void show_tab(int t) {
     for (int i = 0; i < kTabs; i++) for (HWND c : g_tabCtl[i]) ShowWindow(c, i == t ? SW_SHOW : SW_HIDE);
+}
+// Developer switch (swhook.ini debugUi): add or remove the debug page from the tab control. It is
+// always the last page, so the page indices of the normal tabs never move.
+static void set_debug_ui(bool on) {
+    if (on == g_debugUi) return;
+    g_debugUi = on;
+    if (on) { TCITEMW it{}; it.mask = TCIF_TEXT; it.pszText = (LPWSTR)L"デバッグ"; SendMessageW(g_tab, TCM_INSERTITEMW, kDebugTab, (LPARAM)&it); }
+    else {
+        if (TabCtrl_GetCurSel(g_tab) == kDebugTab) { TabCtrl_SetCurSel(g_tab, 0); show_tab(0); }
+        SendMessageW(g_tab, TCM_DELETEITEM, kDebugTab, 0);
+    }
 }
 
 static void build_ui() {
@@ -375,7 +443,7 @@ static void build_ui() {
 
     g_tab = mk(L"SysTabControl32", L"", WS_TABSTOP | WS_CLIPSIBLINGS, 12, 60, 888, 560, ID_TAB);
     const wchar_t* names[] = { L"状態", L"設定", L"起動・注入", L"ログ・録画" };
-    for (int i = 0; i < kTabs; i++) { TCITEMW it{}; it.mask = TCIF_TEXT; it.pszText = (LPWSTR)names[i]; SendMessageW(g_tab, TCM_INSERTITEMW, i, (LPARAM)&it); }
+    for (int i = 0; i < kTabs - 1; i++) { TCITEMW it{}; it.mask = TCIF_TEXT; it.pszText = (LPWSTR)names[i]; SendMessageW(g_tab, TCM_INSERTITEMW, i, (LPARAM)&it); }
     const int X = 24, Y = 92, WID = 864;   // page area
 
     // --- status tab
@@ -386,7 +454,7 @@ static void build_ui() {
     mk(L"STATIC", L"", 0, X + 316, Y + 22, WID - 316, 18, ID_WALK_TXT, 0);
     mk(L"STATIC", L"参加プレイヤー", 0, X, Y + 66, 400, 18, ID_PEERS_LBL, 0);
     HWND pl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 86, WID, 176, ID_PEERS_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(pl, { {L"SteamID", 140}, {L"状態", 50}, {L"送信/s", 80}, {L"同期追加/s", 80}, {L"受信/s", 80}, {L"解析率", 60}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 150}, {L"車両", 40}, {L"tick巻戻", 60}, {L"最終通信", 70} });
+    lv_cols(pl, { {L"SteamID", 130}, {L"状態", 50}, {L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40}, {L"tick巻戻", 55}, {L"最終通信", 60}, {L"凍結検知", 110} });
     mk(L"STATIC", L"車両", 0, X, Y + 272, 640, 18, ID_VEH_LBL, 0);
     mk(L"BUTTON", L"車両一覧を表示（デバッグ用）", WS_TABSTOP | BS_AUTOCHECKBOX, X + WID - 220, Y + 270, 220, 22, ID_VEH_CHK, 0);
     HWND vl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 292, WID, 220, ID_VEH_LV, 0, WS_EX_CLIENTEDGE);
@@ -412,6 +480,28 @@ static void build_ui() {
     mk(L"BUTTON", L"iniに保存", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 98, 110, 26, ID_ST_SAVE, 2);
     mk(L"STATIC", L"", 0, X, Y + 138, WID, 18, ID_ST_DLL, 2);
     mk(L"STATIC", L"", 0, X, Y + 158, WID, 18, ID_ST_INI, 2);
+    mk(L"BUTTON", L"開発者向け「デバッグ」タブを表示する (debugUi) — 通信遮断・テレポート等の実験操作。通常利用では OFF", WS_TABSTOP | BS_AUTOCHECKBOX, X, Y + 200, WID, 22, ID_ST_DEBUG, 2);
+
+    // --- debug tab (developer only; the page always exists, its tab item only while debugUi=1)
+    mk(L"STATIC", L"フリーズ調査用の実験操作です。実プレイヤーの受信内容を変えるので、了解を得た相手にだけ使ってください。操作はすべて captures\\*.log に記録されます。",
+       0, X, Y, WID, 18, ID_DBG_NOTE, kDebugTab);
+    mk(L"STATIC", L"プレイヤー", 0, X, Y + 26, WID, 18, ID_DBG_LBL, kDebugTab);
+    HWND dl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER, X, Y + 46, WID, 200, ID_DBG_LV, kDebugTab, WS_EX_CLIENTEDGE);
+    lv_cols(dl, { {L"SteamID", 140}, {L"位置 (x, y, z)", 150}, {L"凍結検知（pose静止 / 車両定義の未ack）", 560} });
+    mk(L"STATIC", L"通信遮断 (debug.hold)：このプレイヤー宛の送信を指定 ms 間すべて棄却（再送しない）。同期の穴に対する挙動の実験用。", 0, X, Y + 258, WID, 18, ID_DBG_HOLD_LBL, kDebugTab);
+    mk(L"EDIT", L"5000", WS_TABSTOP | ES_NUMBER, X, Y + 280, 80, 24, ID_DBG_HOLD_MS, kDebugTab, WS_EX_CLIENTEDGE);
+    mk(L"BUTTON", L"遮断開始 (ms)", WS_TABSTOP | BS_PUSHBUTTON, X + 88, Y + 279, 130, 26, ID_DBG_HOLD, kDebugTab);
+    mk(L"BUTTON", L"今すぐ解放", WS_TABSTOP | BS_PUSHBUTTON, X + 226, Y + 279, 110, 26, ID_DBG_RELEASE, kDebugTab);
+    mk(L"STATIC", L"緩和プローブ (debug.nudge)：次の tick メッセージに 1 回だけレコードを追加。凍結中のプレイヤーに試し、復帰するか観察。", 0, X, Y + 318, WID, 18, ID_DBG_NUDGE_LBL, kDebugTab);
+    mk(L"BUTTON", L"テレポート (0x5E, 現在位置へ)", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 340, 220, 26, ID_DBG_NUDGE_TP, kDebugTab);
+    mk(L"BUTTON", L"タイル再ロード (0x45, 現在タイル)", WS_TABSTOP | BS_PUSHBUTTON, X + 228, Y + 340, 230, 26, ID_DBG_NUDGE_TILE, kDebugTab);
+    mk(L"BUTTON", L"タイルアンロード (0x46, 現在タイル)", WS_TABSTOP | BS_PUSHBUTTON, X + 466, Y + 340, 240, 26, ID_DBG_NUDGE_UNLOAD, kDebugTab);
+    mk(L"BUTTON", L"タイル再ロード (0x46 → 0.5 秒後 0x45)", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 372, 260, 26, ID_DBG_NUDGE_RELOAD, kDebugTab);
+    mk(L"BUTTON", L"DLL をアンロード (swctl unload)", WS_TABSTOP | BS_PUSHBUTTON, X + 604, Y + 372, 260, 26, ID_DBG_DLL_UNLOAD, kDebugTab);
+    mk(L"STATIC", L"", 0, X, Y + 410, WID, 36, ID_DBG_RESULT, kDebugTab);
+    mk(L"STATIC", L"凍結検知の意味: 「pose」= 自機の位置報告が止まったまま、乗っている車両がサーバー側で動いている。「defs」= サーバーが送った車両定義を 0x29 で ack しない。"
+       L"どちらもクライアントのワールド更新が止まった署名（詳細: tools/swcap/README.md）。検知時は .log に FREEZE? 行と録画マーカーが自動で入ります。",
+       0, X, Y + 452, WID, 54, ID_DBG_HELP, kDebugTab);
 
     // --- log tab
     mk(L"BUTTON", L"ログファイルを書く (log) — captures\\session_<日時>.log。起動・設定変更・同期統計などのイベントを記録", WS_TABSTOP | BS_AUTOCHECKBOX, X, Y, WID, 22, ID_LOGPKT_CHK, 3);
@@ -453,6 +543,20 @@ static void on_command(int id) {
     case ID_AUTO_CHK: g_autoInject = IsDlgButtonChecked(g_wnd, ID_AUTO_CHK) == BST_CHECKED; ini_set("autoInject", g_autoInject ? 1 : 0); break;
     case ID_CAP_AUTO: ini_set("capture", IsDlgButtonChecked(g_wnd, ID_CAP_AUTO) == BST_CHECKED ? 1 : 0); break;
     case ID_ST_SAVE: startup_save(); break;
+    case ID_ST_DEBUG: { bool on = IsDlgButtonChecked(g_wnd, ID_ST_DEBUG) == BST_CHECKED; ini_set("debugUi", on ? 1 : 0); set_debug_ui(on); break; }
+    case ID_DBG_HOLD: { wchar_t v[16]; GetWindowTextW(H(ID_DBG_HOLD_MS), v, 16); debug_cmd("debug.hold", ",\"ms\":" + std::to_string(v[0] ? _wtoi(v) : 5000)); break; }
+    case ID_DBG_RELEASE:    debug_cmd("debug.release", ""); break;
+    case ID_DBG_NUDGE_TP:   debug_cmd("debug.nudge", ",\"kind\":\"tp\""); break;
+    case ID_DBG_NUDGE_TILE: debug_cmd("debug.nudge", ",\"kind\":\"tile\""); break;
+    case ID_DBG_NUDGE_UNLOAD: debug_cmd("debug.nudge", ",\"kind\":\"unload\""); break;
+    case ID_DBG_NUDGE_RELOAD: debug_cmd("debug.nudge", ",\"kind\":\"reload\""); break;
+    case ID_DBG_DLL_UNLOAD: {
+        // Dev hot-swap: the DLL restores the vtable and unmaps itself; auto-inject stays off for this
+        // server pid (g_injectedPid), so rebuild + 「注入」 is the way back in.
+        if (MessageBoxW(g_wnd, L"swhook.dll をサーバーからアンロードします（フック解除・IPC 停止）。\n再注入は「起動・注入」タブの注入ボタンから。よろしいですか？", L"SWMultiSync", MB_OKCANCEL | MB_ICONQUESTION) != IDOK) break;
+        std::string r = ipc("unload");
+        set(ID_DBG_RESULT, W(std::string("unload -> ") + (r.empty() ? "(no reply)" : r)));
+        break; }
     case ID_LOGPKT_CHK: cfg_set("log", IsDlgButtonChecked(g_wnd, ID_LOGPKT_CHK) == BST_CHECKED ? 1 : 0); break;
     case ID_DUMPMAX_APPLY: { wchar_t v[16]; GetWindowTextW(H(ID_DUMPMAX), v, 16); if (v[0]) cfg_set("dumpWalkFailMax", _wtof(v)); break; }
     case ID_DUMPWF_CHK: cfg_set("dumpWalkFail", IsDlgButtonChecked(g_wnd, ID_DUMPWF_CHK) == BST_CHECKED ? 1 : 0); break;
@@ -470,6 +574,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_NOTIFY: {
         NMHDR* n = (NMHDR*)lp;
         if (n->idFrom == ID_TAB && n->code == TCN_SELCHANGE) show_tab(TabCtrl_GetCurSel(g_tab));
+        if (n->idFrom == ID_DBG_LV && (n->code == LVN_ITEMCHANGED || n->code == NM_CLICK)) render_debug();
         if (n->idFrom == ID_CFG_LV && (n->code == LVN_ITEMCHANGED || n->code == NM_CLICK)) {
             int i = ListView_GetNextItem(n->hwndFrom, -1, LVNI_SELECTED);
             if (i >= 0) {

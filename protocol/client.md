@@ -28,7 +28,9 @@ The client-side records don't carry it; the server stamps it.
 | tag | len | meaning | layout |
 |---|---|---|---|
 | 0x66 | 20 | **camera look** (~every 16 ms while the view moves) | tag+3 · 8 B zero · f32 yaw · f32 pitch (rad) — broadcast as SEND 0xA8 (22 B, u16 peer_id prefix) |
-| 0x2F | 60 | **player pose** (~every 78 ms) | tag+3 · double[3] (≈1.50,1.64,-0.98 — constant, not yet identified; possibly local offset / head) · double[3] world pos · u32 = 0x10 · u32 = 7 |
+| 0x2F | 60 | **player pose** (~every 78 ms) | tag+3 · double[3] (≈1.50,1.64,-0.98 — constant, not yet identified; possibly local offset / head) · double[3] world pos · **u32 vehId** the character is in/on (16 beside veh 16; 93 while flying veh 93 — session_20260913_214246_776) · u32 (7 / 0) |
+| 0x1B | 8 | **vehicle definition REQUEST** (answer to a SEND 0x2B placement; one per vehicle) | tag+3 · u32 vehId — server answers with a ch1 msgType=12 definition push; see lifecycle.md "Vehicle definition handshake" |
+| 0x29 | 8 | **vehicle LOADED ack** (after the definition arrived and the client built the vehicle) | tag+3 · u32 vehId — only then does the server send that vehicle's 0x2D/0x2F state to this client |
 | 0x04 | 5 | follows almost every 0x2F | tag · u32 = 0 |
 | 0x34 | 24 | **1 Hz heartbeat** | tag+3 · u32 counter (+60 per record = client tick) · u32 0 · u32 0x3E · u32 2 · u32 0 |
 | 0x0A | 40+n | **component INTERACT (press / release)** | tag+3 · u32 vehId · u32 0 · i32 voxelX · i32 voxelY · i32 voxelZ · u8 pressed(1=down,0=up) · f32[3] hit offset within voxel (±0.125) · u8 0 · u16 n · name[n] |
@@ -47,7 +49,7 @@ The client-side records don't carry it; the server stamps it.
 | 0x32 / 0x2C / 0x4A | 5 | settings bools with own record | tag+3 · u8 — SEND 0x59 / 0x5D / 0x8A |
 | 0x1C | 8 | **vehicle despawn request** | tag+3 · u32 vehId — server answers 0x2C remove + 0x38 despawn + 0x55 + 0x62 + 0x09 in one burst |
 | 0x45 | 5 | **menu open / close** (1 = opened, 0 = closed) | tag+3 · u8 — brackets every settings-menu action (sessions 10–14); not rebroadcast |
-| 0x28 | 12 | **fog cleared on tile** (sent per tile while moving) | tag+3 · i32 tileX · i32 tileZ — mirrored as SEND 0x49 + 0x45 |
+| 0x28 | 12 | **tile handshake ack / fog cleared** (per tile) | tag+3 · i32 tileX · i32 tileZ — in the 4-peer freeze capture every 0x28 answered a SEND **0x45** tile-load 60–120 ms earlier and was followed by that tile's 0x47 state (88:88:88); in the solo fog flight the same record preceded SEND 0x49 + 0x45. See reference.md (tile streaming) |
 | 0x19 | 13 | **tile purchase** | tag+3 · i32 tileX · i32 tileZ · u8 0 — mirrored as SEND 0x4A + 0x62 |
 | 0x1A | 4 | **buy all tiles** (settings menu) | tag+3 — server answers 30 × (0x4A + 0x62) |
 | 0x38 | 13 | **heal request** (first-aid kit primary) | tag+3 · u32 charId · f32 amount (50.0) · u8 0 — mirrored as SEND 0x65 (13 B); sent together with 0x51 held-item + 0x52 `primary` |
@@ -102,7 +104,7 @@ a different family 0x64/0x65 + 0x18 — not decoded yet). What the **other peer*
 | button / lever / monitor touch / keypad open (0x0A) | **yes** (35 → both peers 35 each, ≤1 tick later) | **0x1A** (40 B, = 0x0A without the name) |
 | keypad value (0x0B) | not as a record | only via 0x2E veh data push |
 | seat enter (0x0C) | yes | 0x14 |
-| held-item state / aim / battery (0x51), hotbar select (0x50), look (0x66), pose (0x2F) | **no** | — |
+| held-item state / aim / battery (0x51), hotbar select (0x50), look (0x66), pose (0x2F) | **no** in this session — but in `session_20260913_214246_776` (4 peers, 3 days earlier) 0x50 went to every other peer as **0x27** (12 B: u32 playerId · u32 hotbarIdx) and 0x51 as **0x28** (46 B: u32 playerId + the 0x51 payload), never to the originator. Range/version dependent — re-check | (0x27 / 0x28) |
 
 So a relay only needs 0x29 + 0x1A + 0x14/0x15 to reproduce visible interactions; flashlight beam and
 binocular aiming are not on the wire at all (client-local given the 0x29 `primary` toggle).
@@ -182,8 +184,9 @@ answers nothing. Confirms session 9: surface oil is never transmitted.
 All 100 % walked. Fog reveal = client 0x28 per tile → SEND 0x49 + 0x45; tile purchase = client 0x19 →
 SEND 0x4A + 0x62; buy-all = client 0x1A → 30 × (0x4A + 0x62); clear-all-fog = settings array only
 (0x48 → 0x88, index 1). Details in reference.md (tile section) and settings.md.
-Also seen during the fog flight: client 0x1B (`u32 vehId ×2`: 39, 40) and 0x29 (`u32 39`) at t+18 s
-while vehicles streamed in — load acknowledgements, not yet decoded.
+Also seen during the fog flight: client 0x1B ×2 (vehicles 39, 40 — two adjacent 8-B records, not one
+`u32 ×2`) and 0x29 (`u32 39`) at t+18 s while vehicles streamed in — the definition request / loaded
+ack pair, decoded in lifecycle.md ("Vehicle definition handshake").
 
 ## Not observed in the SEND (server→client) stream (session 1)
 The solo peer received no echo of its own 0x0A/0x0B: SEND had only 0xA8/0x05/0x8E/0x1A/0x39 periodics,

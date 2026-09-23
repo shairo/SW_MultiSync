@@ -12,12 +12,15 @@
 #include <cstdarg>
 #include <cstring>
 #include <string>
+
+#include <vector>
 #include "../common/version.h"
 #include "../common/json.h"
 #include "steam_min.h"
 #include "rec.h"
 #include "relay.h"
 #include "stats.h"
+#include "freeze.h"
 #include "ipc.h"
 
 // Base directory = the folder swhook.dll lives in (resolved at load from the DLL's own path), so the
@@ -209,6 +212,82 @@ static void edit81_offset(uint8_t* body, int blen) {
     }
 }
 
+static uint64_t write_marker();   // capture marker (defined with the capture control below)
+
+// Freeze detector verdict changes → log line + capture marker, so a live occurrence is stamped on the
+// same clock the analyzer uses (`swcap marks` / `swcap freeze`). Caller holds g_cs.
+static void freeze_report(uint64_t sid, int verdict, uint64_t now) {
+    const freeze::Peer& f = freeze::at(sid);
+    if (verdict > 0) {
+        std::string pend;
+        for (auto& kv : f.pending) { char b[24]; _snprintf_s(b, _TRUNCATE, "%s%u", pend.empty() ? "" : ",", (unsigned)kv.first); pend += b; }
+        uint64_t m = write_marker();
+        logf("== FREEZE? peer=%llu reason=%s pose=(%.1f,%.1f,%.1f) veh=%u static=%llums pendingDefs=[%s] mark=%llu ==\n",
+             (unsigned long long)sid, f.reason, f.sx, f.sy, f.sz, (unsigned)f.poseVeh,
+             (unsigned long long)(f.poseMs ? now - f.staticSinceMs : 0), pend.c_str(), (unsigned long long)m);
+    } else if (verdict < 0) {
+        logf("== FREEZE over: peer=%llu pose=(%.1f,%.1f,%.1f) ==\n", (unsigned long long)sid, f.sx, f.sy, f.sz);
+    }
+    logflush();
+}
+
+// ---- debug experiments for the freeze investigation (IPC debug.hold / debug.nudge) ----
+// debug.hold: every send to ONE peer is DROPPED (the game is told it was sent) until `ms` elapse or
+// debug.release. Nothing is queued or replayed: the peer simply misses everything the server said in
+// that window. Earlier version queued and flushed in order, which only showed the client waiting
+// for ticks and fast-forwarding (session_20260922_150005_474); dropping instead tests what the
+// client does when its own tick stream has a real hole — does it resync, stall like the freeze, or
+// request anything. The window ends lazily on the next send after the deadline (no thread).
+// debug.nudge: append records (a teleport 0x5E to the player's own position, a tile-load 0x45 for its
+// current tile, or raw hex) to the peer's NEXT fully-decoded type=8 message — one-shot probes of
+// "does X un-freeze a frozen client", tried while the freeze detector says frozen.
+struct Hold { uint64_t untilMs = 0, startMs = 0, bytes = 0, msgs = 0; };
+static std::map<uint64_t, Hold> g_hold;                       // under g_cs
+struct Nudge {
+    std::vector<uint8_t> recs; int count = 0; std::string kind;
+    uint64_t notBeforeMs = 0;                                 // deliver on the first type=8 send at/after this
+    bool reload = false; int32_t tx = 0, tz = 0;              // "reload": this is the 0x46 half; queue the 0x45 half after delivery
+};
+static std::map<uint64_t, Nudge> g_nudge;                     // under g_cs; consumed by the next type=8 send
+static void put_u32(std::vector<uint8_t>& v, uint32_t x) { v.insert(v.end(), reinterpret_cast<uint8_t*>(&x), reinterpret_cast<uint8_t*>(&x) + 4); }
+constexpr uint64_t kReloadGapMs = 500;                        // 0x46 → 0x45 spacing for the reload probe (a few ticks apart)
+
+// Ends a hold (called under g_cs) and logs what was dropped.
+static void hold_end(std::map<uint64_t, Hold>::iterator it, const char* why) {
+    Hold& h = it->second;
+    logf("== debug.hold %s: peer=%llu held %llums, %llu msgs / %llu B dropped ==\n", why, (unsigned long long)it->first,
+         (unsigned long long)(GetTickCount64() - h.startMs), (unsigned long long)h.msgs, (unsigned long long)h.bytes);
+    logflush();
+    g_hold.erase(it);
+}
+// Final delivery of one send: drop it (held peer) or pass it to the original.
+static int32_t deliver(void* self, const SteamNetworkingIdentity* id, uint64_t sid,
+                       const void* data, uint32_t cub, int32_t flags, int32_t ch) {
+    EnterCriticalSection(&g_cs);
+    auto it = g_hold.find(sid);
+    if (id && it != g_hold.end()) {
+        if (GetTickCount64() >= it->second.untilMs || !g_hooked) hold_end(it, "released");
+        else {
+            it->second.msgs++; it->second.bytes += cub;
+            LeaveCriticalSection(&g_cs);
+            return 1;                                         // k_EResultOK: the game believes it was sent
+        }
+    }
+    LeaveCriticalSection(&g_cs);
+    return g_origSend(self, id, data, cub, flags, ch);
+}
+// Append `n` records (already laid out back to back in `recs`) to a type=8 message: patch the
+// transport total (+4) and recordCount (body+16). Returns a malloc'd buffer the caller frees.
+static uint8_t* append_records(const uint8_t* src, uint32_t cub, const std::vector<uint8_t>& recs, int n, uint32_t& outCub) {
+    outCub = cub + (uint32_t)recs.size();
+    uint8_t* out = static_cast<uint8_t*>(malloc(outCub));
+    if (!out) return nullptr;
+    memcpy(out, src, cub); memcpy(out + cub, recs.data(), recs.size());
+    uint32_t total = rec::U32(out, (int)outCub, 4) + (uint32_t)recs.size(); memcpy(out + 4, &total, 4);
+    uint32_t cnt = rec::U32(out + 8, (int)outCub - 8, 16) + (uint32_t)n; memcpy(out + 8 + 16, &cnt, 4);
+    return out;
+}
+
 // ---- hooks ----
 static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
                            const void* data, uint32_t cub, int32_t flags, int32_t ch) {
@@ -227,6 +306,10 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
     // ch15 1-byte control: 0x01 session open, 0x02 close. Close marks the peer disconnected; any later
     // traffic re-marks it (stats::touch), so a rejoin shows up naturally.
     if (ch == 15 && cub == 1 && b[0] == 0x02) ps.connected = false;
+    // ch1 type=12 = a vehicle definition pushed to this peer (answer to its 0x1B request); the
+    // freeze detector waits for the matching 0x29 "loaded" ack from the client.
+    if (ch == 1 && head && blen >= 12 && *reinterpret_cast<const uint32_t*>(body + 4) == 12)
+        freeze::on_defpush(sid, *reinterpret_cast<const uint32_t*>(body + 8), GetTickCount64());
     bool full = false;
     int newcub = 0; uint8_t* inj = nullptr;
     if (type8) {
@@ -239,6 +322,11 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
         if (full) ps.walkFull++; else { ps.walkPartial++; dump_walkfail(0, n, sid, ch, flags, w, data, cub); }
         if (full) {
             relay::observe(sid, body, blen, tick);                   // passive: keep caches warm
+            for (int i = 0, off = 20, cnt = (int)rec::U32(body, blen, 16); i < cnt && off < blen; i++) {   // 0x2C = vehicle gone for this peer
+                int L = rec::decode_len(body, blen, off); if (L <= 0) break;
+                if (rec::U32(body, blen, off) == 0x2C) freeze::on_remove(sid, rec::U32(body, blen, off + 4));
+                off += L;
+            }
             if (g_relay) {                                           // build the injected copy
                 int cap = (int)cub + relay::kMaxPerSend * relay::kMaxRecLen;
                 inj = static_cast<uint8_t*>(malloc(cap));
@@ -257,26 +345,45 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
             }
         }
     }
+    // debug.nudge (one-shot): take the pending records for this peer while still under the lock.
+    Nudge nudge;
+    if (type8 && full) {
+        auto nit = g_nudge.find(sid);
+        if (nit != g_nudge.end() && GetTickCount64() >= nit->second.notBeforeMs) { nudge = std::move(nit->second); g_nudge.erase(nit); }
+    }
     LeaveCriticalSection(&g_cs);
 
-    // Stage-C relay (default OFF): send the enlarged COPY with dead-reckoned 0x81s appended.
+    // Pick the buffer to deliver: the relay's enlarged COPY, the stage-B demo COPY, or the original.
+    // Never the caller's buffer when edited; only ever edited when the message fully decoded.
+    const uint8_t* outp = b; uint32_t outcub = cub; uint8_t* owned = nullptr;
     if (inj) {
-        if (newcub > 0) { int32_t rc = g_origSend(self, id, inj, (uint32_t)newcub, flags, ch); free(inj); return rc; }
-        free(inj);
+        if (newcub > 0) { owned = inj; outp = inj; outcub = (uint32_t)newcub; }
+        else free(inj);
     }
-    // Stage-B visible demo (default OFF): send an edited COPY, never the caller's buffer, and
-    // only when the message fully decoded (so we never corrupt something we don't understand).
-    if (g_mutate && type8 && full) {
+    if (!owned && g_mutate && type8 && full) {
         uint8_t* s = static_cast<uint8_t*>(malloc(cub));
+        if (s) { memcpy(s, data, cub); edit81_offset(s + 8, blen); owned = s; outp = s; }
+    }
+    if (nudge.count > 0) {
+        uint32_t nc = 0;
+        uint8_t* s = append_records(outp, outcub, nudge.recs, nudge.count, nc);
         if (s) {
-            memcpy(s, data, cub);
-            edit81_offset(s + 8, blen);
-            int32_t rc = g_origSend(self, id, s, cub, flags, ch);
-            free(s);
-            return rc;
+            if (owned) free(owned);
+            owned = s; outp = s; outcub = nc;
+            EnterCriticalSection(&g_cs);
+            logf("== debug.nudge %s delivered: peer=%llu tick=%u +%d records (%u B) ==\n", nudge.kind.c_str(), (unsigned long long)sid, tick, nudge.count, (unsigned)nudge.recs.size());
+            logflush();
+            if (nudge.reload) {                               // second half of "reload": the 0x45 a few ticks later
+                Nudge f; f.kind = "reload/0x45"; f.notBeforeMs = GetTickCount64() + kReloadGapMs;
+                put_u32(f.recs, 0x45); put_u32(f.recs, (uint32_t)nudge.tx); put_u32(f.recs, (uint32_t)nudge.tz); f.recs.push_back(0); f.count = 1;
+                g_nudge[sid] = std::move(f);
+            }
+            LeaveCriticalSection(&g_cs);
         }
     }
-    return g_origSend(self, id, data, cub, flags, ch);
+    int32_t rc = deliver(self, id, sid, outp, outcub, flags, ch);
+    if (owned) free(owned);
+    return rc;
 }
 
 static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** ppOut, int32_t nMax) {
@@ -301,11 +408,21 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                     ps.type3++;
                     rec::Walk w = rec::walk_client(body, blen);
                     if (w.full) ps.rwalkFull++; else { ps.rwalkPartial++; dump_walkfail(1, n, sid, m->m_nChannel, m->m_nFlags, w, b, cub); }
-                    if (w.first81 >= 0 && w.first81 + 52 <= blen) {
+                    if (w.first81 >= 0 && w.first81 + 56 <= blen) {
                         memcpy(&ps.px, body + w.first81 + 28, 8); memcpy(&ps.py, body + w.first81 + 36, 8); memcpy(&ps.pz, body + w.first81 + 44, 8);
                         ps.posMs = now;
                         relay::observe_pose(sid, ps.px, ps.py, ps.pz);   // distance LOD input (relay.h nat_gap_of)
+                        freeze::on_pose(sid, ps.px, ps.py, ps.pz, rec::U32(body, blen, w.first81 + 52), now);
                     }
+                    // vehicle definition handshake: 0x1B request / 0x29 loaded (both tag+3 · u32 vehId)
+                    for (int i = 0, off = 14; i < w.walked && off < blen; i++) {
+                        int L = rec::decode_client_len(body, blen, off); if (L <= 0) break;
+                        if (body[off] == 0x1B) freeze::on_defreq(sid, rec::U32(body, blen, off + 4), now);
+                        else if (body[off] == 0x29) freeze::on_defack(sid, rec::U32(body, blen, off + 4), now);
+                        off += L;
+                    }
+                    int verdict = freeze::check(sid, now, relay::g_cfg.freezePoseMs, relay::g_cfg.freezeDefMs);
+                    if (verdict) freeze_report(sid, verdict, now);
                 }
             }
         }
@@ -389,7 +506,7 @@ static void write_status(json::JsonW& w) {
     w.key("inject").obj()
         .kv("sends", relay::g_injSends).kv("appended", relay::g_injRecords)
         .kv("rewritten", relay::g_rewrites).kv("bytes", relay::g_injBytes).end();
-    w.kv("seq", g_seq).kv("marks", g_markCount);
+    w.kv("seq", g_seq).kv("marks", g_markCount).kv("freezeEvents", freeze::g_events);
 }
 static void write_peers(json::JsonW& w) {
     uint64_t now = GetTickCount64();
@@ -408,6 +525,16 @@ static void write_peers(json::JsonW& w) {
          .kv("tickRewinds", p.tickRewinds).kv("vehicles", vehs)
          .kv("type3", p.type3).kv("rwalkFull", p.rwalkFull).kv("rwalkPartial", p.rwalkPartial);
         if (p.posMs) w.key("pos").arr().num(p.px).num(p.py).num(p.pz).end().kv("posMs", p.posMs);
+        auto fit = freeze::g_peers.find(kv.first);
+        if (fit != freeze::g_peers.end()) {
+            const freeze::Peer& f = fit->second;
+            w.key("freeze").obj()
+             .kv("frozenSinceMs", f.frozenSinceMs).kv("reason", f.reason).kv("events", f.events)
+             .kv("poseVeh", (unsigned)f.poseVeh).kv("poseStaticMs", f.poseMs ? now - f.staticSinceMs : 0)
+             .kv("defReqs", f.defReqs).kv("defAcks", f.defAcks).kv("unackedMs", freeze::oldest_unacked_ms(f, now));
+            w.key("pendingDefs").arr(); for (auto& d : f.pending) w.num((double)d.first); w.end();
+            w.end();
+        }
         w.end();
     }
     w.end();
@@ -531,6 +658,80 @@ static std::string ipc_handle(const std::string& line) {
         int n = load_relay_config();
         w.kvb("ok", n >= 0).kv("keys", n); write_config(w);
         if (n < 0) w.kv("error", "swhook.ini not found");
+    } else if (cmd == "debug.hold" || cmd == "debug.release") {
+        uint64_t sid = 0; double ms = 5000;
+        if (!json::get_u64(line.c_str(), "peer", sid) || !sid) { w.kvb("ok", false).kv("error", "missing peer"); }
+        else if (cmd == "debug.release") {
+            auto it = g_hold.find(sid);
+            if (it == g_hold.end()) w.kvb("ok", false).kv("error", "no hold on that peer");
+            else { w.kvb("ok", true).kv("peer", sid).kv("dropped", it->second.msgs); hold_end(it, "released early"); }
+        } else {
+            json::get_num(line.c_str(), "ms", ms);
+            if (ms < 0) ms = 0; if (ms > 60000) ms = 60000;
+            uint64_t now = GetTickCount64();
+            bool fresh = !g_hold.count(sid);
+            Hold& h = g_hold[sid];
+            h.untilMs = now + (uint64_t)ms;
+            if (fresh) h.startMs = now;
+            logf("== debug.hold: peer=%llu for %.0f ms (%s, sends are dropped) ==\n", (unsigned long long)sid, ms, fresh ? "new" : "extended"); logflush();
+            w.kvb("ok", true).kv("peer", sid).kv("ms", ms).kvb("extended", !fresh);
+        }
+    } else if (cmd == "debug.nudge") {
+        // kind: "tp" (0x5E fast-travel to x,y,z — default: the player's last pose — + bare 0x09),
+        //       "tile" (0x45 load handshake for the tile at x,z — default: the player's own tile),
+        //       "unload" (0x46 tile unload for the same tile; the server does NOT know, so nothing reloads it),
+        //       "reload" (0x46 now, then 0x45 for the same tile kReloadGapMs later — the forced tile reload probe),
+        //       "raw" (hex = records back to back, count = how many recordCount must grow by)
+        uint64_t sid = 0; std::string kind = "tp", hex; double x = 0, y = 0, z = 0, cnt = 1;
+        json::get_str(line.c_str(), "kind", kind);
+        if (!json::get_u64(line.c_str(), "peer", sid) || !sid) { w.kvb("ok", false).kv("error", "missing peer"); }
+        else {
+            auto sp = stats::g_peers.find(sid);
+            bool havePose = sp != stats::g_peers.end() && sp->second.posMs;
+            if (havePose) { x = sp->second.px; y = sp->second.py; z = sp->second.pz; }
+            bool hx = json::get_num(line.c_str(), "x", x), hy = json::get_num(line.c_str(), "y", y), hz = json::get_num(line.c_str(), "z", z);
+            Nudge nd; nd.kind = kind; std::string err;
+            auto put32 = [&](uint32_t v) { nd.recs.insert(nd.recs.end(), reinterpret_cast<uint8_t*>(&v), reinterpret_cast<uint8_t*>(&v) + 4); };
+            auto putf64 = [&](double v) { nd.recs.insert(nd.recs.end(), reinterpret_cast<uint8_t*>(&v), reinterpret_cast<uint8_t*>(&v) + 8); };
+            if (kind == "tp") {
+                if (!havePose && !(hx && hy && hz)) err = "no pose known for peer; pass x,y,z";
+                else { put32(0x5E); putf64(x); putf64(y); putf64(z); nd.recs.push_back(1); put32(0x09); nd.count = 2; }
+            } else if (kind == "tile" || kind == "unload" || kind == "reload") {
+                if (!havePose && !(hx && hz)) err = "no pose known for peer; pass x,z";
+                else {
+                    int32_t tx = (int32_t)floor((x + 500.0) / 1000.0), tz = (int32_t)floor((z + 500.0) / 1000.0);   // 1 km grid, see protocol/reference.md
+                    if (json::get_num(line.c_str(), "tileX", x)) tx = (int32_t)x;
+                    if (json::get_num(line.c_str(), "tileZ", z)) tz = (int32_t)z;
+                    if (kind == "tile") { put32(0x45); put32((uint32_t)tx); put32((uint32_t)tz); nd.recs.push_back(0); }
+                    else                { put32(0x46); put32((uint32_t)tx); put32((uint32_t)tz); }
+                    nd.count = 1; nd.tx = tx; nd.tz = tz; nd.reload = (kind == "reload");
+                }
+            } else if (kind == "raw") {
+                json::get_num(line.c_str(), "count", cnt);
+                if (!json::get_str(line.c_str(), "hex", hex) || hex.size() < 8 || hex.size() % 2) err = "need hex (even length, >= 4 bytes) and count";
+                else {
+                    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+                        unsigned v = 0; if (sscanf_s(hex.c_str() + i, "%2x", &v) != 1) { err = "bad hex"; break; }
+                        nd.recs.push_back((uint8_t)v);
+                    }
+                    nd.count = (int)cnt;
+                    // gate: the appended bytes must walk as `count` records with the server-side rules
+                    if (err.empty()) {
+                        int off = 0, n = 0;
+                        while (off < (int)nd.recs.size()) { int L = rec::decode_len(nd.recs.data(), (int)nd.recs.size(), off); if (L <= 0) break; off += L; n++; }
+                        if (off != (int)nd.recs.size()) err = "hex does not walk with the record rules";
+                        else if (n != nd.count) err = "count mismatch: walked " + std::to_string(n) + " records";
+                    }
+                }
+            } else err = "unknown kind (tp|tile|unload|reload|raw)";
+            if (!err.empty()) w.kvb("ok", false).kv("error", err);
+            else {
+                g_nudge[sid] = nd;
+                logf("== debug.nudge queued: peer=%llu kind=%s pos=(%.1f,%.1f,%.1f) %d records ==\n", (unsigned long long)sid, kind.c_str(), x, y, z, nd.count); logflush();
+                w.kvb("ok", true).kv("peer", sid).kv("kind", kind).kv("records", nd.count).kv("bytes", (unsigned)nd.recs.size());
+                if (kind == "tp") w.key("pos").arr().num(x).num(y).num(z).end();
+            }
+        }
     } else if (cmd == "unload") {
         HANDLE t = CreateThread(nullptr, 0, UnloadThread, nullptr, 0, nullptr);
         if (t) { CloseHandle(t); w.kvb("ok", true).kvb("hooked", g_hooked); logf("== unload requested (ipc) ==\n"); logflush(); }

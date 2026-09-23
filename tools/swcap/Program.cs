@@ -31,6 +31,7 @@ switch (cmd)
     case "lifespan": Lifespan(path, rest); break;
     case "unz": Unz(path, rest); break;
     case "attick": AtTick(path, rest); break;
+    case "events": Events(path, rest); break;
     case "rec": Track.Rec(path, int.TryParse(Opt(rest, "--take"), out var rt) ? rt : 60); break;
     case "track": Track.TrackId(path, uint.Parse(Opt(rest, "--id")),
                     int.TryParse(Opt(rest, "--take"), out var kt) ? kt : 200); break;
@@ -93,6 +94,11 @@ static void Usage()
       swcap lifespan <file> [--near T]           per-vehicle 0x81 first/last tick + sample count
       swcap unz    <file> --id N                 inflate zlib payload of a 0x2F record + hex dump
       swcap attick <file> --at T [--w N]         records in a tick window (flood tags filtered)
+      swcap events <file> --peer S [--from MS] [--to MS] [--all]
+                                                one recipient's event stream on the t+ms clock:
+                                                non-flood SEND records (msgType 8) + ch1 file pushes
+                                                (type 12/13: vehicle definitions). --all keeps
+                                                0x81/0x1B/... floods too
       swcap diff   <file> --a SEQ --b SEQ        byte diff of two message bodies
       swcap churn  <file> [--dir S|R] [--ch N] [--type N] [--top N]
                                                 per-offset change frequency across a stream
@@ -545,6 +551,45 @@ static void AtTick(string path, string[] a)
     Console.WriteLine("\ntag counts in window:");
     foreach (var kv in tagCount.OrderByDescending(k=>k.Value)) Console.Write($"0x{kv.Key:X2}:{kv.Value}  ");
     Console.WriteLine();
+}
+
+// One recipient's event stream on the t+ms clock (same clock as `when`/`marks`): every non-flood
+// msgType=8 record with its first bytes, plus the ch1 pushes (type 12 = vehicle definition
+// `u32 vehId · u16 · u32 · u32 rawLen · zlib`, type 13 = small placement record). Used to line the
+// server's lifecycle output up against the client's request stream (client 0x1B = definition
+// request, 0x29 = loaded ack) when hunting the tile-crossing freeze.
+static void Events(string path, string[] a)
+{
+    var peer = PeerOpt(a);
+    if (peer is null) { Console.WriteLine("need --peer S"); return; }
+    long from = long.TryParse(Opt(a, "--from"), out var fv) ? fv : 0;
+    long to   = long.TryParse(Opt(a, "--to"),   out var tv) ? tv : long.MaxValue;
+    bool all  = Flag(a, "--all");
+    var frames = Container.Read(path).ToList();
+    ulong t0 = frames.Count > 0 ? frames.Min(f => f.TickMs) : 0;
+    var msByseq = frames.ToDictionary(f => f.Seq, f => f.TickMs);
+    foreach (var m in Message.Reassemble(frames))
+    {
+        if (m.SteamId != peer || m.Dir != Dir.Send) continue;
+        long ms = (long)(msByseq[m.StartSeq] - t0);
+        if (ms < from || ms > to) continue;
+        if (m.Channel == 1)
+        {
+            uint ty = m.Complete ? m.MsgType : 0;
+            string head = string.Join(" ", m.Body.Skip(8).Take(16).Select(x => x.ToString("X2")));
+            Console.WriteLine($"t+{ms,7}  ch1 type={ty} len={m.Body.Length,7}  {head}");
+            continue;
+        }
+        if (!m.Complete || m.Channel != 0 || m.MsgType != 8 || m.RecordCount == 0) continue;
+        var (recs, full, _) = Records.Walk(m);
+        foreach (var r in recs)
+        {
+            if (r.Status != RecStatus.Ok) { Console.WriteLine($"t+{ms,7}  tick {m.Tick,7}  0x{r.Tag:X2} {r.Status}"); break; }
+            if (!all && r.Tag is 0x81 or 0x8E or 0xA8 or 0xA6 or 0xA7 or 0x05 or 0x07 or 0x2E or 0x1B or 0x39 or 0x1D or 0x50 or 0x94 or 0x09) continue;
+            var bytes = m.Body.AsSpan(r.Start, Math.Min(r.Length, 24)).ToArray();
+            Console.WriteLine($"t+{ms,7}  tick {m.Tick,7}  0x{r.Tag:X2} ({r.Tag,3}) {r.Length,6}  {string.Join(" ", bytes.Select(x => x.ToString("X2")))}  {r.Note}");
+        }
+    }
 }
 
 // Inflate the zlib payload of every 0x2F (compressed per-vehicle state) record for a given vehicle id

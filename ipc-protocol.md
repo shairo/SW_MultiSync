@@ -36,6 +36,9 @@ tool; the bundled GUI / `swctl` use exactly this and nothing else.
 | `config.set` | `key`, `value` | `key`, `value` (after clamping), `startupOnly` |
 | `config.reload` | – | `keys` applied, `config{}` |
 | `config.save` | – | `path` (writes swhook.ini, comments preserved) |
+| `debug.hold` | `peer` (SteamID64), `ms` (0..60000, default 5000) | `peer`, `ms`, `extended` — DROP every send to that peer (the game is told it was sent) until `ms` elapse or `debug.release`; nothing is queued or replayed, so the client gets a real hole in its tick stream. (An earlier queue-and-flush variant only showed the client waiting for ticks and fast-forwarding.) Calling it again extends the deadline; the window ends lazily on the next send after it |
+| `debug.release` | `peer` | `peer`, `dropped` — end a hold now |
+| `debug.nudge` | `peer`, `kind` (`tp` \| `tile` \| `unload` \| `reload` \| `raw`), optional `x` `y` `z` / `tileX` `tileZ` / `hex` + `count` | `peer`, `kind`, `records`, `bytes`[, `pos[3]`] — append records to the peer's NEXT fully-decoded tick message (one-shot). `tp` = 0x5E fast-travel to x,y,z (default: the player's last pose) + bare 0x09; `tile` = 0x45 load handshake for the tile at x,z (default: the player's own tile); `unload` = 0x46 unload of that tile (the server does not know, so nothing reloads it — a client-side "tile gone" state on demand); `reload` = the 0x46 now and a 0x45 for the same tile 500 ms later (forced tile reload; see the 2026-09-22 experiment in `tools/swcap/README.md`); `raw` = your own records as hex, refused unless they walk with the server-side length rules as exactly `count` records. Freeze-mitigation probes, see `tools/swcap/README.md` |
 | `unload` | – | `hooked` — restores the vtable, drains in-flight calls, closes IPC/files and unmaps the DLL (~1 s later). Development aid: `swctl unload && build && swctl inject` iterates without a server restart. All counters/caches reset. |
 
 `startupOnly` keys (`relay`, `capture`, `ipcPort`) change the stored value only; the running
@@ -44,6 +47,7 @@ behaviour of those is controlled live via `relay.set` / `capture.*`, and the por
 ### status fields
 `version protocol pid uptimeMs nowMs hooked hookError relay capturing mutate captureFile
 captureBytes logFile walkFailFile ipcPort ipcClients ipcRequests peerCount vehicleCount seq marks`
+`freezeEvents` — freeze-detector onsets this session (all peers).
 `walk{type8 full partial appendOk appendBad dumped}` — record-walker understanding gate
 (`full/type8` = walk rate). `inject{sends appended rewritten bytes}` — relay totals.
 
@@ -54,6 +58,13 @@ type3 rwalkFull rwalkPartial [pos[3] posMs]`
 `type3`/`rwalkFull`/`rwalkPartial` are the client→server (msgType=3) counterparts of the walk KPI;
 `pos` is the player's last world position from client 0x2F (absent until one is seen), `posMs` its
 GetTickCount64 stamp (compare with `nowMs`).
+`freeze{frozenSinceMs reason events poseVeh poseStaticMs defReqs defAcks unackedMs pendingDefs[]}` — the
+client-freeze detector (`src/hook/freeze.h`, thresholds `freezePoseMs` / `freezeDefMs` in config).
+`frozenSinceMs` is 0 while healthy; `reason` is `pose` (the player's 0x2F pose has not changed for
+`poseStaticMs` while the vehicle it sits in, `poseVeh`, moved ≥ 20 m on the server), `defs` (a vehicle
+definition the server pushed in answer to the client's 0x1B request has had no 0x29 loaded-ack for
+`unackedMs`), or both. `pendingDefs` lists the unacked vehicle ids. Each onset also writes a
+`FREEZE?` line to the session .log and a capture marker. Present only for peers that sent a pose.
 `tickRewinds` counts type=8 frames whose world tick was below the highest seen for that peer
 (a server resend/rewind; the relay never touches those frames). Expected to stay 0.
 `sendBytes` = what the game itself sent this peer (native); `injBytes` = extra bytes we added on

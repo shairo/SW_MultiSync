@@ -4,6 +4,6 @@
 #pragma once
 #define SWHOOK_VERSION_MAJOR 0
 #define SWHOOK_VERSION_MINOR 2
-#define SWHOOK_VERSION_PATCH 1
-#define SWHOOK_VERSION      "0.2.1"
+#define SWHOOK_VERSION_PATCH 2
+#define SWHOOK_VERSION      "0.2.2"
 #define SWHOOK_IPC_PROTOCOL 1        // bump when a command's request/response shape changes

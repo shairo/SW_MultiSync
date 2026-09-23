@@ -33,6 +33,37 @@ tick-for-tick — e.g. id 18's two 0x2C (8236, 10371) landed exactly on its two 
 0x37 and 0x2B carry the **same spawn-point double[3] position**; 0x2B repeats the id twice at the tail
 (like 0x38). Full minimal-vehicle lifecycle: `0x96 → 0x37 → (0x2D + 0x2F) → 0x2B → 0x81 … → 0x2C(+0x38)`.
 
+### Vehicle definition handshake — placement is a REQUEST, the state waits for the client  ✅ (`session_20260913_214246_776_freeze`, 4 peers, 25 loads each)
+The load is a round trip, and the server does not push the vehicle's state until the client says it
+has built the vehicle:
+
+```
+server → client   0x2B placement (+0x62)            "vehicle V exists here"   (ch0, msgType 8)
+client → server   0x1B  u32 V   (tag+3 · u32, 8 B)  "send me V's definition" — one per vehicle, same tick
+server → client   ch1 msgType=12                    the definition (see below), ~30 ms later, reliable
+client → server   0x29  u32 V   (8 B)               "V is loaded"  — 60–150 ms later for a small vehicle,
+                                                    1.3 s for a 186 KB one (the client stalls while it builds it)
+server → client   0x2D + 0x2F (+0x30 …)             load state, ~16 ms after the 0x29 — NOT before
+```
+Every peer gets the same 0x2B for every vehicle the server loads — the load set is global (the idle
+peer 28 km away requested and acked all 25 vehicles too), not per-recipient range. The server holds
+the 0x2D/0x2F back per recipient until that recipient's 0x29 arrives; a client that never acks
+(the frozen one, see `tools/swcap/README.md`) simply never receives the state for those ids.
+
+**ch1 msgType=12 — vehicle definition push** (single frame, flags 8 = reliable; 772 B .. 187 KB):
+```
++8  u32 vehId          (body +0)
++12 u16 = 0            (body +4)
++14 u32 = ?            (body +6; 0x012C .. 0x2626, grows with the vehicle — record/part count?)
++18 u32 rawLen         (body +10; inflated size: 0x05D4 = 1492 B for the smallest, 0x0C0FCF for the 187 KB one)
++22 zlib stream (78 01) — the vehicle XML / component data, per vehicle id, no filename
+```
+**ch1 msgType=13** (54 B): `u16 2 · double[3] pos · u32 0x30 · u32 0x0C · u32 0 · zlib(empty)` — a placement
+with an empty payload, seen once right before a client's ch1 type=14 upload (a player spawning a
+vehicle: the 78 KB **RECV ch1 type=14** is the client sending its vehicle file up).
+Client-side lengths (`protocol/client.md`): 0x1B and 0x29 are both `tag+3 · u32 vehId` (8 B); the old
+reading of 0x1B as "u32 ×2" was two adjacent 0x1B records.
+
 ## Object lifecycle  ✅ CONFIRMED (`session_20260915_012132_375_coal`, coal spawn/collect)
 
 | event | record |

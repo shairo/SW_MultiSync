@@ -31,7 +31,8 @@ the few types/offsets we touch). The analyzer `tools/swcap` is C# / net10.0
 
 - `src/hook/` — the injected DLL (`swhook.dll`): DllMain, interface-pointer acquisition, vtable
   swap, SendMessageToUser thunk, logging, `rec.h` (record walker, port of `Records.cs`), `relay.h`
-  (relay + `Cfg` table), `stats.h` (per-peer counters), `ipc.h` (control-plane transport).
+  (relay + `Cfg` table), `stats.h` (per-peer counters), `freeze.h` (client-freeze detector: pose
+  static vs its vehicle moving, 0x1B→0x29 definition acks), `ipc.h` (control-plane transport).
 - `src/common/` — `version.h` (single version string) and `json.h` (dependency-free writer +
   flat reader), shared by the DLL and the C++ clients.
 - `src/inject/` — `injector.h` (shared LoadLibrary-via-CreateRemoteThread core) and the tiny
@@ -44,7 +45,9 @@ the few types/offsets we touch). The analyzer `tools/swcap` is C# / net10.0
   directly via `relay.h`; everything else goes through IPC.
 - `tools/swcap/` — offline analyzer; `tools/rectest/` — `test_rec` / `test_relay` apply `rec.h` /
   `relay.h` to real captures (walk failures must stay 0 after any relay change); `test_dist` pairs
-  0x81 dETA with recipient↔vehicle distance (native distance LOD, see protocol/sync.md).
+  0x81 dETA with recipient↔vehicle distance (native distance LOD, see protocol/sync.md); `test_freeze`
+  replays `freeze.h` over a capture (must fire on the 214246_776_freeze file for peer …8477 only, on
+  nothing else). Build each from a vcvars64 shell: `cl /std:c++17 /O2 /EHsc /Fe:build	est_x.exe toolsectest	est_x.cpp`.
 - `build.bat` — builds DLL, inject.exe, swctl.exe, SWMultiSync.exe.
 - `package.bat` — build + stage `dist\SW_MultiSync_v<ver>\` + zip. Ships GUI, CLI, DLL, ini (with
   `relay=1` forced), `packaging/README_*.txt`, `ipc-protocol.md`. Version = `src/common/version.h`.
@@ -69,3 +72,5 @@ DLL from any process: the listener comes up before the Steam wait.
   keep promise ETAs short). Re-run `test_relay` on the combat captures before calling it done.
 - Protocol findings go in `protocol/*.md` + `Records.cs`, not here. Always analyse captures
   per recipient (`--peer <SteamID>`).
+- Debug IPC commands (`debug.hold`, `debug.nudge`) alter what a real client receives — experiments
+  only, never on by default, never in the GUI; every use is logged.

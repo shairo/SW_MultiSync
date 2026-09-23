@@ -29,12 +29,31 @@ vehicle's dETA looks huge only because distant-observer records are mixed in). S
 | 0x09 9   | fixed 4  | bare tag / flag |
 | 0x62 98  | fixed 12 | vehicle load companion: tag · u32 20000 · u32 5 — one per 0x2B placement (lifecycle.md) |
 | 0x94 148 | fixed 8  | tag + u32 vehId; HIGH freq with MULTIPLE vehicles |
-| 0x47 71  | 16 + u32@12 | tag + u32 + i32 + u32 payloadLen + payload; spawn burst |
+| 0x47 71  | 16 + u32@12 | tag + i32 tileX + i32 tileZ + u32 payloadLen + payload — the tile's dynamic state, sent after the client acks a 0x45 tile load (see below) |
 | 0xA6 166 | fixed 22 | seat KEY STATE broadcast: tag + u16 peer_id + u32 keyMask + 12 B zero (mirror of client 0x64, see client.md) |
 | 0xA7 167 | fixed 11 | seat AXIS broadcast: tag · u16 peer_id · u32 axisIdx 0..7 · u8 value — mirror of client 0x65 (runs of 8 at seat enter) |
 | 0xA8 168 | fixed 22 | player LOOK broadcast: tag · u16 peer_id · 8 B zero · f32 yaw · f32 pitch — mirror of client 0x66, ~every 16 ticks while the view moves |
 
-## Tile / world-grid streaming — 0x45 / 0x46 / 0x49 / 0x4A  ✅ length, ✅ meaning (updated 2026-09-17)
+## Tile / world-grid streaming — 0x45 / 0x46 / 0x47 / 0x49 / 0x4A  ✅ length, ✅ meaning (updated 2026-09-22)
+**Server-driven tile set (session_20260913_214246_776_freeze, 4 peers, 63 s):** the 0x45/0x46/0x49
+stream is **byte-identical to every peer** (195 records each) — it is the SERVER's loaded-tile set,
+broadcast, not per-recipient. The set is the union of a **radius-2 ring (5×5, 1 km tiles,
+index = floor((pos+500)/1000))** around every player's vehicle, re-evaluated ~1–2 s behind the
+server-side position. Per tile:
+```
+0x45 (x,z,0)  server: LOAD tile        →  client 0x28 (x,z) ack, 60–120 ms later
+                                      →  server 0x47 (x,z, len, payload): the tile's dynamic state
+                                         (len 0 = sea, 5 = one entry `00 A0 00 00 00`, up to ~1 KB —
+                                         the same `u8 1·u32 width·value·u8 0·u32 idx` list as 0x2E)
+0x46 (x,z)    server: UNLOAD tile      (no answer)
+0x49 (x,z)    with 0x45: the tile was never loaded/revealed before in this session (18 of 88)
+```
+88 × 0x45 ↔ 88 × client 0x28 ↔ 88 × 0x47, fully paired even on the frozen client (it keeps acking
+tile loads while its simulation is stopped — the ack comes from the network thread). A tile a
+player ENTERS is normally already in the set (loaded when it came within 2 tiles); entering it
+sends nothing tile-specific to that client.
+
+Earlier (solo, 2026-09-17) reading, still valid for the fog case:
 **Fog of war (session_20260917_012608):** as the player moves, the *client* sends 0x28 (`i32 tileX ·
 i32 tileZ`) for every tile whose fog it cleared (an L-shaped ring edge on each tile crossing); the server
 answers each with **0x49 (x,z) + 0x45 (x,z,u8 0)**. So 0x49/0x45 = "fog revealed" broadcast, client

@@ -34,6 +34,10 @@ static void usage() {
            "  config reload|save         re-read / write back swhook.ini\n"
            "  version | ping             client and DLL versions / reachability\n"
            "  unload                     restore hooks and unmap the DLL (dev aid; then inject again)\n"
+           "  hold <peer> [ms]           debug: DROP every send to that peer for ms (default 5000)\n"
+           "  release <peer>             debug: end a hold early\n"
+           "  nudge <peer> [tp|tile|unload|reload]  debug: append a fast-travel 0x5E to the player's own pose (or a\n"
+           "                             0x45 tile-load / 0x46 unload / 0x46-then-0x45 reload for its tile) to the peer's next tick message\n"
            "  raw <json>                 send a raw request line\n"
            "--json prints the DLL's raw response instead of the table.\n", SWHOOK_VERSION);
 }
@@ -93,8 +97,8 @@ static std::map<std::string, PeerSample> g_prev; static double g_prevMs = 0;
 static void print_peers(const std::string& r, bool rates) {
     const char* o = r.c_str();
     double now = N(o, "nowMs"); double dt = (g_prevMs && now > g_prevMs) ? (now - g_prevMs) / 1000.0 : 0;
-    printf("%-18s %-5s %9s %9s %9s %7s %7s %5s %6s %6s %-26s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
-           rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "rwalk%", "vehs", "type8", "rewind", "pos (x y z)", "last");
+    printf("%-18s %-5s %9s %9s %9s %7s %7s %5s %6s %6s %-26s %-8s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
+           rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "rwalk%", "vehs", "type8", "rewind", "pos (x y z)", "last", "freeze");
     json::for_each_elem(json::find_value(o, "peers"), [&](const char* p) {
         std::string id = ID(p, "steamId");
         bool conn = false; json::get_bool(p, "connected", conn);
@@ -104,9 +108,18 @@ static void print_peers(const std::string& r, bool rates) {
         if (rates) { PeerSample& ps = g_prev[id]; vs = dt ? (sb - ps.sendBytes) / dt : 0; vi = dt ? (ib - ps.injBytes) / dt : 0; vr = dt ? (rb - ps.recvBytes) / dt : 0; ps = {sb, ib, rb}; }
         double t3 = N(p, "type3"), rwf = N(p, "rwalkFull"), pos[3] = {0,0,0}; char posS[40];
         if (json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3) snprintf(posS, sizeof posS, "%.0f %.0f %.0f", pos[0], pos[1], pos[2]); else strcpy(posS, "-");
-        printf("%-18s %-5s %9s %9s %9s %6.1f%% %6.1f%% %5.0f %6.0f %6.0f %-26s %.0fs ago\n", id.c_str(), conn ? "yes" : "no",
+        // freeze detector verdict (freeze.h): "-" healthy, else reason + how long; "ok (N past)" after recovery
+        char frz[48] = "-", ago[24];
+        snprintf(ago, sizeof ago, "%.0fs ago", (now - N(p, "lastSeenMs")) / 1000);
+        const char* fz = json::find_value(p, "freeze");
+        if (fz) {
+            double since = N(fz, "frozenSinceMs"), ev = N(fz, "events");
+            if (since > 0) snprintf(frz, sizeof frz, "FROZEN %s %.0fs", S(fz, "reason").c_str(), (now - since) / 1000);
+            else if (ev > 0) snprintf(frz, sizeof frz, "ok (%.0f past)", ev);
+        }
+        printf("%-18s %-5s %9s %9s %9s %6.1f%% %6.1f%% %5.0f %6.0f %6.0f %-26s %-8s %s\n", id.c_str(), conn ? "yes" : "no",
                fmt_bytes(vs).c_str(), fmt_bytes(vi).c_str(), fmt_bytes(vr).c_str(),
-               t8 ? 100.0 * wf / t8 : 0, t3 ? 100.0 * rwf / t3 : 0, N(p, "vehicles"), t8, N(p, "tickRewinds"), posS, (now - N(p, "lastSeenMs")) / 1000);
+               t8 ? 100.0 * wf / t8 : 0, t3 ? 100.0 * rwf / t3 : 0, N(p, "vehicles"), t8, N(p, "tickRewinds"), posS, ago, frz);
     });
     g_prevMs = now;
 }
@@ -236,6 +249,16 @@ int main(int argc, char** argv) {
         if (v == "reload") { r = run("config.reload"); if (r.empty() || !ok_of(r)) return 1; if (!g_json) printf("reloaded %.0f keys\n", N(r.c_str(), "keys")); return 0; }
         if (v == "save")   { r = run("config.save");   if (r.empty() || !ok_of(r)) return 1; if (!g_json) printf("saved %s\n", S(r.c_str(), "path").c_str()); return 0; }
         usage(); return 1;
+    }
+    if (cmd == "hold" || cmd == "release" || cmd == "nudge") {
+        if (!rest) { usage(); return 1; }
+        std::string peer = arg(0), extra = "\"peer\":" + peer;
+        if (cmd == "hold")  { extra += ",\"ms\":" + std::string(rest > 1 ? arg(1) : "5000"); r = run("debug.hold", extra); }
+        if (cmd == "release") r = run("debug.release", extra);
+        if (cmd == "nudge") { extra += ",\"kind\":\"" + std::string(rest > 1 ? arg(1) : "tp") + "\""; r = run("debug.nudge", extra); }
+        if (r.empty() || !ok_of(r)) return 1;
+        if (!g_json) printf("%s\n", r.c_str());
+        return 0;
     }
     if (cmd == "raw") {
         if (!rest) { usage(); return 1; }

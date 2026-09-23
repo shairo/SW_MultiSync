@@ -63,10 +63,14 @@ struct Cfg {
     int    capture = 0;   // 1 = auto-start .swcap capture at startup (default off: capture is for diagnosis)
     int    ipcPort = 28215; // localhost TCP port of the control-plane (GUI/CLI/other tools)
     int    autoInject = 1; // GUI only: inject as soon as server64.exe appears (the DLL ignores this key)
+    int    debugUi    = 0; // GUI only: show the developer debug tab (hold / nudge experiments, freeze details)
     // logging (hot-reloadable)
     int    log          = 1;   // 1 = write the session .log (event lines: startup, config, relay stats, hook status)
     int    dumpWalkFail = 0;   // 1 = record every type=8 frame the walker could not fully decode (walkfail_*.swcap)
     int    dumpWalkFailMax = 200; // cap on walk-fail frames per session (disk safety)
+    // client-freeze detector (freeze.h): thresholds in ms, 0 disables that signal
+    int    freezePoseMs = 2000;   // pose static this long while the seated vehicle moves on the server
+    int    freezeDefMs  = 3000;   // a pushed vehicle definition unacknowledged (no 0x29) this long
 };
 inline Cfg g_cfg;
 
@@ -98,9 +102,12 @@ inline const CfgField kCfgFields[] = {
     {"capture",         true,  &Cfg::capture,         nullptr, true,  "1 = start .swcap capture at startup"},
     {"ipcPort",         true,  &Cfg::ipcPort,         nullptr, true,  "control-plane TCP port (127.0.0.1)"},
     {"autoInject",      true,  &Cfg::autoInject,      nullptr, true,  "GUI: 1 = inject automatically when server64.exe starts"},
+    {"debugUi",         true,  &Cfg::debugUi,         nullptr, true,  "GUI: 1 = show the developer debug tab (experiments; not for normal use)"},
     {"log",             true,  &Cfg::log,             nullptr, false, "1 = write the session .log file"},
     {"dumpWalkFail",    true,  &Cfg::dumpWalkFail,    nullptr, false, "1 = record undecodable type=8 frames to walkfail_*.swcap"},
     {"dumpWalkFailMax", true,  &Cfg::dumpWalkFailMax, nullptr, false, "max walk-fail frames per session"},
+    {"freezePoseMs",    true,  &Cfg::freezePoseMs,    nullptr, false, "freeze detector: pose static this long while its vehicle moves (ms, 0 = off)"},
+    {"freezeDefMs",     true,  &Cfg::freezeDefMs,     nullptr, false, "freeze detector: pushed vehicle definition unacked this long (ms, 0 = off)"},
 };
 constexpr int kCfgFieldCount = (int)(sizeof(kCfgFields) / sizeof(kCfgFields[0]));
 

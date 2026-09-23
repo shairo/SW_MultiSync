@@ -32,7 +32,7 @@ Mean: ✅ decoded · △ partial · ❌ unknown.
 | 0x96 | 150 | vehicle create marker (13-B pair) | ✅ | ✅ | lifecycle |
 | 0x37 | 55 | vehicle spawn placement (pos): 54 + nA (vehicle name @+50) + nB (@+52+nA) | ✅ | ✅ | lifecycle |
 | 0x2B | 43 | vehicle spawn placement-2 (90+nA+nB: location name + display name; always + 0x62) | ✅ | ✅ | lifecycle |
-| 0x2D | 45 | vehicle load state (push family) | ✅ | △ | lifecycle |
+| 0x2D | 45 | vehicle load state (push family) — sent only after the client's 0x29 loaded-ack (lifecycle: definition handshake) | ✅ | △ | lifecycle |
 | 0x2F | 47 | vehicle load state (zlib transform) | ✅ | △ | lifecycle |
 | 0x2C | 44 | **universal remove** vehicle id (unload/despawn/destroy) | ✅ | ✅ | lifecycle |
 | 0x38 | 56 | **despawn-only** marker (with 0x2C) | ✅ | ✅ | lifecycle |
@@ -51,7 +51,7 @@ Mean: ✅ decoded · △ partial · ❌ unknown.
 | 0x4A | 74 | tile purchased (12 B: x,z) + 0x62; buy-all = 30 in one message | ✅ | ✅ | reference |
 | 0x95 | 149 | map-object create marker (10+n: objId + label), precedes 0x3A | ✅ | ✅ | ui-chat |
 | 0x49 0x45 | 73 69 | fog-of-war tile revealed (x,z) pair — mirror of client 0x28 | ✅ | ✅ | reference |
-| 0x46 | 70 | tile streaming ring (x,z), precedes 0x47 runs | ✅ | △ | reference |
+| 0x46 | 70 | tile UNLOAD (x,z) — server's broadcast tile set; 0x45 = load (client acks 0x28, then 0x47 tile state) | ✅ | ✅ | reference |
 | 0x3F | 63 | tree felled (tile coord + treeIndex + type) | ✅ | ✅ | reference |
 | 0xAD | 173 | tree fall physics (float[3]); pairs w/ 0x3F | ✅ | △ | reference |
 | 0x92 0x76 0x31 0x9D 0x74 0x75 0xA9 | 146 118 49 157 116 117 169 | combat-capture records, lengths verified (44/32/20/67/40/36/32), meaning candidate | ✅ | △ | damage-combat |
@@ -85,7 +85,8 @@ Mean: ✅ decoded · △ partial · ❌ unknown.
 | 0x20 | 32 | equip-adjacent (S4) | ✅ | ❌ | ui-chat |
 | 0x67 | 103 | character vitals (hp) — mirror of client 0x39 | ✅ | ✅ | damage-combat |
 | 0x0B 0x0C | 11 12 | other-player avatar pair | ✅ | ✅ | ui-chat |
-| 0x05 0x09 0x62 0x94 0x47 | 5 9 98 148 71 | periodic / spawn-burst / misc | ✅ | ❌ | reference |
+| 0x05 0x09 0x62 0x94 | 5 9 98 148 | periodic / spawn-burst / misc | ✅ | ❌ | reference |
+| 0x47 | 71 | per-tile dynamic state (x,z + payload) after a 0x45 tile load is acked | ✅ | △ | reference |
 | 0x07 | 7 | seat-entry snapshot broadcast (71 B) — mirror of client 0x01 | ✅ | ✅ | client |
 | 0xA6 0xA7 0xA8 | 166 167 168 | player input broadcasts: seat keyMask / seat axis / camera look — mirrors of client 0x64 / 0x65 / 0x66 | ✅ | ✅ | client |
 
