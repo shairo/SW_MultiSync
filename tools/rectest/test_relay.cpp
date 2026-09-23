@@ -26,10 +26,10 @@ int main(int argc, char** argv) {
         int n = relay::load_config_file(argv[2]);
         if (n < 0) { printf("cannot open config %s\n", argv[2]); return 1; }
         const relay::Cfg& c = relay::g_cfg;
-        printf("config %s: %d keys -> intervalMin=%d intervalMax=%d lodDenser=%d lag=%d horizonMax=%d "
+        printf("config %s: %d keys -> intervalMin=%d intervalMax=%d lodDenser=%d distLod=%d lag=%d "
                "relayMinGap=%d srcRatio=%.2f stale=%d gapOutlier=%.0f maxPerSend=%d budgetWindow=%d "
                "capKbpsPerPeer=%d\n",
-               argv[2], n, c.intervalMin, c.intervalMax, c.lodDenser, c.lag, c.horizonMax,
+               argv[2], n, c.intervalMin, c.intervalMax, c.lodDenser, c.distLod, c.lag,
                c.relayMinGap, c.srcRatio, c.stale, c.gapOutlier, c.maxPerSend, c.budgetWindow, c.capKbpsPerPeer);
     }
     FILE* f = fopen(argv[1], "rb");

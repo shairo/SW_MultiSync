@@ -34,12 +34,16 @@ namespace relay {
 // Sending pose = P(ETA − Λ) instead (extrapolated along the velocity) makes it arrive at the true
 // position Λ ticks after the sample and keep gliding along the predicted path: steady lag Λ at
 // the true speed. The price is the prediction horizon h = ETA − Λ − sampleTick, which is where
-// turning overshoot comes from; horizonMax caps it (trading lag for accuracy on coarse sources).
+// turning overshoot comes from. A promise's horizon is bounded by `stale` alone (see promise_of).
 // Hard compile-time maxima used for buffer/array sizing. NOT tunable at runtime (they bound the
 // allocations below); the runtime knobs in Cfg may never exceed these.
 constexpr int    kMaxPerSend = 24;   // buffer-sizing max on records appended to one message
 constexpr int    kMaxRecLen  = 2048; // per-vehicle template cap
 
+// Bound on the prediction horizon of an UNMANAGED native rewrite (pass 1): the server's ETA is kept
+// (up to ~720 ticks out), so without it a coarse-only vehicle would be dead-reckoned ~11 s ahead from
+// a chord velocity (star paths, 目的と設計.md §4-7). No freeze risk: the server re-sends at its ETA.
+constexpr long   kNativeHorizon = 30;
 // Runtime-tunable relay knobs (loaded from swhook.ini; see load defaults / set_cfg below). Defaults
 // reproduce the previously hardcoded values, so behaviour is unchanged when no config file exists.
 struct Cfg {
@@ -48,9 +52,6 @@ struct Cfg {
     int    lodDenser   = 8;    // cost cap: relay a vehicle no denser than native_gap / lodDenser (0 = always I_src)
     int    distLod     = 1;    // 1 = floor the measured native gap by the server's distance rule (recipient↔vehicle), so an approaching vehicle densifies before native catches up
     int    lag         = 5;    // target render lag Λ (ticks): the relayed vehicle sits this far behind reality
-    int    horizonMax  = 300;  // cap on the prediction horizon (ticks) once the source stalls; never below 2·I + margin. Keep ≥ stale: a
-                               // lower cap pins successive targets to one point and the recipient sees the vehicle FREEZE until the next sample
-                               // (missile 132 → peer 8477, session_20260922_023854_351: source gap 356 vs cap 123 froze it at closest approach)
     int    relayMinGap = 10;   // only relay when native gap exceeds this (else native is fine)
     double srcRatio    = 0.5;  // relay only when the source samples at most this fraction of the recipient's native gap
     int    stale       = 300;   // don't relay if freshest source older than this (ticks)
@@ -90,7 +91,6 @@ inline const CfgField kCfgFields[] = {
     {"lodDenser",       true,  &Cfg::lodDenser,       nullptr, false, "cadence cost cap: no denser than native gap / this (0 = off)"},
     {"distLod",         true,  &Cfg::distLod,         nullptr, false, "1 = native gap = min(measured, distance rule 0.1*d-6) so approaching vehicles densify early"},
     {"lag",             true,  &Cfg::lag,             nullptr, false, "target render lag (ticks)"},
-    {"horizonMax",      true,  &Cfg::horizonMax,      nullptr, false, "cap on prediction horizon (ticks)"},
     {"relayMinGap",     true,  &Cfg::relayMinGap,     nullptr, false, "append only when native gap exceeds this (ticks); below it native records are still rewritten"},
     {"srcRatio",        false, nullptr, &Cfg::srcRatio,         false, "relay only when source gap <= native gap x this"},
     {"stale",           true,  &Cfg::stale,           nullptr, false, "skip if source older than this (ticks)"},
@@ -127,12 +127,12 @@ inline bool set_cfg(const char* k, double v) {
         if (!strcmp(k, "hotkeys")) return true;   // removed in 0.2: accepted and ignored for old ini files
         if (!strcmp(k, "lagRatio") || !strcmp(k, "lagMin")) return true;   // pre-I_src model: accepted and ignored
         return false;
+        if (!strcmp(k, "horizonMax")) return true;   // removed: capping a promise pins it and freezes the vehicle
     }
     if (f->isInt) g_cfg.*f->ip = ci(v); else g_cfg.*f->dp = v;
     // clamps
     if (g_cfg.lag < 0) g_cfg.lag = 0;
     if (g_cfg.lodDenser < 0) g_cfg.lodDenser = 0;
-    if (g_cfg.horizonMax < 1) g_cfg.horizonMax = 1;
     if (g_cfg.srcRatio < 0) g_cfg.srcRatio = 0; if (g_cfg.srcRatio > 1) g_cfg.srcRatio = 1;
     if (g_cfg.maxPerSend > kMaxPerSend) g_cfg.maxPerSend = kMaxPerSend;
     if (g_cfg.maxPerSend < 1) g_cfg.maxPerSend = 1;
@@ -266,8 +266,8 @@ inline float  F(const uint8_t* p) { float v; memcpy(&v, p, 4); return v; }
 inline void   WF(uint8_t* p, float v) { memcpy(p, &v, 4); }
 
 // Relay cadence for (recipient, vehicle) = the measured source cadence, coarsened for far recipients
-// by the cost cap (no denser than natGap / lodDenser: a 10 km vehicle need not get 12 updates/s;
-// horizonMax then turns the coarser cadence into extra lag rather than extra overshoot), clamped.
+// by the cost cap (no denser than natGap / lodDenser: a 10 km vehicle need not get 12 updates/s),
+// clamped.
 inline int interval_of(const Veh& v, uint32_t natGap) {
     long i = v.srcGap > 0 ? (long)(v.srcGap + 0.5) : g_cfg.intervalMax;
     if (g_cfg.lodDenser > 0 && (long)natGap / g_cfg.lodDenser > i) i = (long)natGap / g_cfg.lodDenser;
@@ -437,12 +437,11 @@ inline void fill_pose(uint8_t* r, int avail, const Veh& v, uint32_t targetTick) 
 // The promise we make recipient B for V at send tick `tick`: ETA and the pose's target tick.
 //   ETA    = tick + I + margin   (we re-send every I ticks, fresh sample or dead-reckoned)
 //   target = ETA − Λ        so the client renders Λ behind reality at the true speed
-//   horizon = target − sampleTick, capped at max(horizonMax, 2I + margin)
-// The cap must admit one full cadence of bridging: the second promise built from the same sample
-// (age ≈ I) targets ≈ 2I ahead of it. A cap below that pins successive targets to the same point, so
-// the client glides there once and then sits still until the next sample — stop-and-go on coarse
-// sources (missiles far from everyone, srcGap > ~16 with the defaults). horizonMax therefore only
-// bites when the source has stalled (age > I), which is the dead-reckoning bound it was meant to be.
+// The horizon target − sampleTick is NOT capped: any cap pins successive targets built from the same
+// sample to one point, so the client glides there once and sits still until the next sample (far
+// missiles stop-and-go, 2026-09-19; a receding missile froze at the target's closest approach when
+// its source gap 356 exceeded the cap, 2026-09-22). Dead reckoning is bounded by `stale` instead:
+// managed() drops the vehicle once the sample is older than that.
 // When this is the last record we can send before `stale` cuts the source off, ETA is stretched to
 // the server's own next-send time instead, so the client keeps gliding until native takes over.
 inline void promise_of(const Veh& v, uint64_t peer, uint32_t V, uint32_t tick, uint32_t& eta, uint32_t& target) {
@@ -454,9 +453,7 @@ inline void promise_of(const Veh& v, uint64_t peer, uint32_t V, uint32_t tick, u
         auto eit = g_natEta.find(key);
         if (eit != g_natEta.end() && eit->second > eta) eta = eit->second;
     }
-    long hmax = 2L * I + (long)kRefreshMargin; if (hmax < g_cfg.horizonMax) hmax = g_cfg.horizonMax;
     long tl = (long)eta - g_cfg.lag;
-    if (tl - (long)v.curT > hmax) tl = (long)v.curT + hmax;
     target = tl > (long)v.curT ? (uint32_t)tl : v.curT;
 }
 
@@ -493,7 +490,7 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
     // pass 1: rewrite native records into our promise. Managed vehicles get ETA = tick + I as well;
     // every other vehicle with a velocity and a native gap above `lag` keeps the server's ETA and only
     // has its pose moved to predict(ETA − Λ): the horizon is natGap − Λ (tiny for near vehicles, capped
-    // by horizonMax for a coarse-only source), so even vehicles below relayMinGap — or a solo player's
+    // by kNativeHorizon for a coarse-only source), so even vehicles below relayMinGap — or a solo player's
     // own far vehicle — render closer to Λ behind instead of a full native interval behind.
     int rewrote = 0, count = (int)rec::U32(body, blen, 16), off = 20;
     for (int i = 0; i < count; i++) {
@@ -517,7 +514,7 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
                     if (git == g_natGap.end() || git->second <= (uint32_t)g_cfg.lag) { off += L; continue; }
                     eta = rec::U32(body, blen, off + 8);                             // server's ETA, kept
                     long tl = (long)eta - g_cfg.lag;
-                    if (tl - (long)v.curT > g_cfg.horizonMax) tl = (long)v.curT + g_cfg.horizonMax;
+                    if (tl - (long)v.curT > kNativeHorizon) tl = (long)v.curT + kNativeHorizon;
                     target = tl > (long)v.curT ? (uint32_t)tl : v.curT;
                 }
                 fill_pose(body + off, blen - off, v, target);
