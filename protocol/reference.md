@@ -48,6 +48,8 @@ server-side position. Per tile:
 0x46 (x,z)    server: UNLOAD tile      (no answer)
 0x49 (x,z)    with 0x45: the tile was never loaded/revealed before in this session (18 of 88)
 ```
+**0x45 trailing u8 = tile purchased (2026-09-23).** A 0x45 re-sent for a tile the client already had (`?unstuck` / `?unstuck2`, u8 0) turned that tile UNPURCHASED on the client (workbench unusable) until it was unloaded by teleporting away and reloaded. The server sends u8 1 only rarely — (4,-6) / (1,-4) at join or respawn, 24 of 25 zeros even in an all-purchased world (session_20260923_182705_304) — so it probably tracks purchase only for tiles with a workbench. `?unstuck` now sends 1.
+
 88 × 0x45 ↔ 88 × client 0x28 ↔ 88 × 0x47, fully paired even on the frozen client (it keeps acking
 tile loads while its simulation is stopped — the ack comes from the network thread). A tile a
 player ENTERS is normally already in the set (loaded when it came within 2 tiles); entering it
