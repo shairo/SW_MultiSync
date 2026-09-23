@@ -17,11 +17,14 @@ Low frequency. The sender-name field gives a **SteamID → player-name** mapping
 
 **Player chat round trip** (`session_20260923_154831_464`, `hoge` / `fuga`): the client sends
 **RECV 0x02** (`tag+3 · u16 n · text`, 6+n B) and the server broadcasts **0x01** with the same text and
-the player's name as sender **~16 ms (1 tick) later**. For a player line the sender is always the
-in-game name (addons can announce under any name, but they are not answering a pending client 0x02
-with identical text). The DLL pairs the two by exact text within 2 s — unique pending match only — to
-fill `peers[].name` for players whose join request it never saw (ipc-protocol.md). A server command
-(`?echo xyz`) comes back with different text and sender `[Server]`, so it never pairs.
+the player's name as sender in the **next world tick or the one after** (+1 / +2 over the latest tick
+sent when the 0x02 arrived; 0–16 ms; 5 of 5 lines in the two chat captures). For a player line the
+sender is always the in-game name (addons can announce under any name, but they are not answering a
+pending client 0x02 with identical text). The DLL pairs the two by exact text within +2 ticks — unique
+pending match only, since players often type the same thing — to fill `peers[].name` for players whose
+join request it never saw (ipc-protocol.md). Lines starting with `?` are addon commands: the addon
+consumes them and they never reach the chat (`?echo xyz` came back as `xyz` from `[Server]`), so the
+DLL does not keep them.
 
 ## 0x8E (142) — popup / setPopupScreen  ✅ length + semantics CONFIRMED
 ```

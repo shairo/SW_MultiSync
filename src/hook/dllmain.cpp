@@ -134,9 +134,12 @@ static uint64_t peer_id(const SteamNetworkingIdentity* id) {
 
 // ---- player names (peers[].name). Caller holds g_cs. ----
 // Two sources: the join request (RECV msgType=1, authoritative) and chat. A player's own chat line
-// (client 0x02 text) comes back ~1 tick later as a SEND 0x01 broadcast with the same text and the
-// sender name, which for a player is always their in-game name (addons may announce under any name,
-// but only a player line is waiting in g_chatPending). Chat fills only a missing name: it covers
+// (client 0x02 text) comes back as a SEND 0x01 broadcast with the same text and the sender name,
+// which for a player is always their in-game name (addons may announce under any name, but only a
+// player line is waiting in g_chatPending). The echo rides the world tick after the one current when
+// the line arrived: +1..+2 in every capture, so only that window pairs — players often type the same
+// thing, and a wider window would let someone else's identical line pair instead. `?` lines are addon
+// commands that never reach the chat, so they are not kept. Chat fills only a missing name: it covers
 // players who joined before the DLL was injected. protocol/ui-chat.md.
 static std::string clean_name(const uint8_t* s, int n) {
     std::string nm;
@@ -148,13 +151,18 @@ static void learn_name(uint64_t sid, stats::Peer& ps, const std::string& nm, con
     logf("name: peer %llu \"%s\" (%s)\n", (unsigned long long)sid, nm.c_str(), src);
     ps.name = nm;
 }
-struct ChatLine { std::string text; uint64_t ms; };
+static uint32_t g_worldTick = 0;                     // highest type=8 world tick sent to anyone
+struct ChatLine { std::string text; uint32_t tick; };  // tick = g_worldTick when the line arrived
 static std::map<uint64_t, ChatLine> g_chatPending;   // sid -> its last chat line, awaiting the 0x01 echo
-static const uint64_t kChatEchoMs = 2000;
-static void on_chat_echo(const std::string& text, const std::string& name, uint64_t now) {
+static const uint32_t kChatEchoTicks = 2;
+static void on_chat_line(uint64_t sid, const uint8_t* text, int n) {
+    if (n > 0 && text[0] == '?') return;             // addon command: consumed by the addon, never echoed
+    g_chatPending[sid] = { std::string((const char*)text, n), g_worldTick };
+}
+static void on_chat_echo(const std::string& text, const std::string& name, uint32_t tick) {
     uint64_t hit = 0; int n = 0;
     for (auto it = g_chatPending.begin(); it != g_chatPending.end();) {
-        if (now - it->second.ms > kChatEchoMs) { it = g_chatPending.erase(it); continue; }
+        if (tick > it->second.tick + kChatEchoTicks) { it = g_chatPending.erase(it); continue; }
         if (it->second.text == text) { hit = it->first; n++; }
         ++it;
     }
@@ -347,6 +355,7 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
     if (type8) {
         ps.type8++;
         if (tick > ps.lastTick) ps.lastTick = tick;
+        if (tick > g_worldTick) g_worldTick = tick;
         rec::Walk w = selftest(body, blen);
         full = w.full;
         if (full) ps.walkFull++; else { ps.walkPartial++; dump_walkfail(0, n, sid, ch, flags, w, data, cub); }
@@ -358,7 +367,7 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
                 else if (rec::U32(body, blen, off) == 0x01 && !g_chatPending.empty()) {   // chat: u16 n · text · u16 m · sender
                     int tn = (int)rec::U16(body, blen, off + 4), nn = (int)rec::U16(body, blen, off + 6 + tn);
                     if (nn > 0 && nn <= 64)
-                        on_chat_echo(std::string((const char*)body + off + 6, tn), clean_name(body + off + 8 + tn, nn), GetTickCount64());
+                        on_chat_echo(std::string((const char*)body + off + 6, tn), clean_name(body + off + 8 + tn, nn), tick);
                 }
                 off += L;
             }
@@ -461,7 +470,7 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                         if (body[off] == 0x1B) freeze::on_defreq(sid, rec::U32(body, blen, off + 4), now);
                         else if (body[off] == 0x29) freeze::on_defack(sid, rec::U32(body, blen, off + 4), now);
                         else if (body[off] == 0x02)     // chat line: u16 n · text (L = 6 + n, walk-checked)
-                            g_chatPending[sid] = { std::string((const char*)body + off + 6, rec::U16(body, blen, off + 4)), now };
+                            on_chat_line(sid, body + off + 6, (int)rec::U16(body, blen, off + 4));
                         else if (body[off] == 0x34) {   // heartbeat: u32 clientTick · u32 0 · u32 clientTps · u32 framesBehind
                             ps.cliTick = rec::U32(body, blen, off + 4); ps.cliTps = rec::U32(body, blen, off + 12);
                             ps.cliBehind = rec::U32(body, blen, off + 16); ps.hbMs = now;
