@@ -132,6 +132,38 @@ static uint64_t peer_id(const SteamNetworkingIdentity* id) {
     return (id && id->m_eType == kIdentityType_SteamID) ? id->m_steamID64 : 0;
 }
 
+// ---- player names (peers[].name). Caller holds g_cs. ----
+// Two sources: the join request (RECV msgType=1, authoritative) and chat. A player's own chat line
+// (client 0x02 text) comes back ~1 tick later as a SEND 0x01 broadcast with the same text and the
+// sender name, which for a player is always their in-game name (addons may announce under any name,
+// but only a player line is waiting in g_chatPending). Chat fills only a missing name: it covers
+// players who joined before the DLL was injected. protocol/ui-chat.md.
+static std::string clean_name(const uint8_t* s, int n) {
+    std::string nm;
+    for (int k = 0; k < n; k++) if (s[k] >= 0x20 && s[k] != 0x7F) nm += (char)s[k];
+    return nm;
+}
+static void learn_name(uint64_t sid, stats::Peer& ps, const std::string& nm, const char* src) {
+    if (nm.empty() || nm == ps.name) return;
+    logf("name: peer %llu \"%s\" (%s)\n", (unsigned long long)sid, nm.c_str(), src);
+    ps.name = nm;
+}
+struct ChatLine { std::string text; uint64_t ms; };
+static std::map<uint64_t, ChatLine> g_chatPending;   // sid -> its last chat line, awaiting the 0x01 echo
+static const uint64_t kChatEchoMs = 2000;
+static void on_chat_echo(const std::string& text, const std::string& name, uint64_t now) {
+    uint64_t hit = 0; int n = 0;
+    for (auto it = g_chatPending.begin(); it != g_chatPending.end();) {
+        if (now - it->second.ms > kChatEchoMs) { it = g_chatPending.erase(it); continue; }
+        if (it->second.text == text) { hit = it->first; n++; }
+        ++it;
+    }
+    if (n != 1) return;                              // none, or two players said the same thing at once
+    g_chatPending.erase(hit);
+    auto pit = stats::g_peers.find(hit);
+    if (pit != stats::g_peers.end() && pit->second.name.empty()) learn_name(hit, pit->second, name, "chat");
+}
+
 // Passive self-test on one type=8 message body (const1 at body[0]). Caller holds g_cs. Walks with
 // the C++ rules; on a fully-decoded message that contains a 0x81, also simulates appending a copy of
 // that 0x81 (recordCount++) into g_scratch and re-walks to prove the inject arithmetic closes. This
@@ -323,6 +355,11 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
             for (int i = 0, off = 20, cnt = (int)rec::U32(body, blen, 16); i < cnt && off < blen; i++) {   // 0x2C = vehicle gone for this peer
                 int L = rec::decode_len(body, blen, off); if (L <= 0) break;
                 if (rec::U32(body, blen, off) == 0x2C) freeze::on_remove(sid, rec::U32(body, blen, off + 4));
+                else if (rec::U32(body, blen, off) == 0x01 && !g_chatPending.empty()) {   // chat: u16 n · text · u16 m · sender
+                    int tn = (int)rec::U16(body, blen, off + 4), nn = (int)rec::U16(body, blen, off + 6 + tn);
+                    if (nn > 0 && nn <= 64)
+                        on_chat_echo(std::string((const char*)body + off + 6, tn), clean_name(body + off + 8 + tn, nn), GetTickCount64());
+                }
                 off += L;
             }
             if (g_relay) {                                           // build the injected copy
@@ -406,12 +443,7 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                 // attempt (again after a password prompt), so a rejoin under a new name overwrites.
                 if (rec::U32(body, blen, 0) == 1 && rec::U32(body, blen, 4) == 1) {
                     int n = body[8] | (body[9] << 8);
-                    if (n > 0 && n <= 64 && 10 + n <= blen) {
-                        std::string nm;
-                        for (int k = 0; k < n; k++) if (body[10 + k] >= 0x20 && body[10 + k] != 0x7F) nm += (char)body[10 + k];
-                        if (nm != ps.name) logf("join: peer %llu name \"%s\"\n", (unsigned long long)sid, nm.c_str());
-                        ps.name = nm;
-                    }
+                    if (n > 0 && n <= 64 && 10 + n <= blen) learn_name(sid, ps, clean_name(body + 10, n), "join");
                 }
                 if (rec::U32(body, blen, 0) == 1 && rec::U32(body, blen, 4) == 3) {
                     ps.type3++;
@@ -428,6 +460,8 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                         int L = rec::decode_client_len(body, blen, off); if (L <= 0) break;
                         if (body[off] == 0x1B) freeze::on_defreq(sid, rec::U32(body, blen, off + 4), now);
                         else if (body[off] == 0x29) freeze::on_defack(sid, rec::U32(body, blen, off + 4), now);
+                        else if (body[off] == 0x02)     // chat line: u16 n · text (L = 6 + n, walk-checked)
+                            g_chatPending[sid] = { std::string((const char*)body + off + 6, rec::U16(body, blen, off + 4)), now };
                         else if (body[off] == 0x34) {   // heartbeat: u32 clientTick · u32 0 · u32 clientTps · u32 framesBehind
                             ps.cliTick = rec::U32(body, blen, off + 4); ps.cliTps = rec::U32(body, blen, off + 12);
                             ps.cliBehind = rec::U32(body, blen, off + 16); ps.hbMs = now;

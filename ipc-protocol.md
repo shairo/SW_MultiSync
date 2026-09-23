@@ -56,7 +56,8 @@ captureBytes logFile walkFailFile ipcPort ipcClients ipcRequests peerCount vehic
 injSends injBytes injRecords type8 walkFull walkPartial vehicles
 type3 rwalkFull rwalkPartial [sync{…}] [pos[3] posMs]`
 `name` is the in-game player name (UTF-8) from the client's join request (RECV msgType=1, see
-`protocol/transport.md`); `""` for players who joined before the DLL was injected.
+`protocol/transport.md`); for players who joined before the DLL was injected it is filled from their
+first chat line (the server's 0x01 echo carries the sender name, `protocol/ui-chat.md`); `""` until then.
 `type3`/`rwalkFull`/`rwalkPartial` are the client→server (msgType=3) counterparts of the walk KPI;
 `pos` is the player's last world position from client 0x2F (absent until one is seen), `posMs` its
 GetTickCount64 stamp (compare with `nowMs`).
