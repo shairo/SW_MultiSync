@@ -161,7 +161,7 @@ static void refresh_config() {
         for (const relay::CfgField& f : relay::kCfgFields) { double v; if (json::get_num(cfg, f.name, v)) relay::set_cfg(f.name, v); }
     } else {
         relay::g_cfg = relay::Cfg();
-        relay::load_config_file(g_iniPath.c_str());
+        relay::load_config_file(g_iniPath);
     }
     std::vector<std::vector<std::wstring>> rows;
     for (const relay::CfgField& f : relay::kCfgFields) {
@@ -189,9 +189,9 @@ static void cfg_set(const std::string& key, double val) {
         if (!ipc_ok(r)) { MessageBoxW(g_wnd, (L"設定に失敗しました: " + W(Sx(r.c_str(), "error"))).c_str(), L"SWMultiSync", MB_ICONWARNING); return; }
     } else {
         relay::g_cfg = relay::Cfg();
-        relay::load_config_file(g_iniPath.c_str());     // re-read: never clobber concurrent edits
+        relay::load_config_file(g_iniPath);     // re-read: never clobber concurrent edits
         if (!relay::set_cfg(key.c_str(), val)) { MessageBoxW(g_wnd, L"不明な設定項目です。", L"SWMultiSync", MB_ICONWARNING); return; }
-        if (!relay::save_config_file(g_iniPath.c_str())) { MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWMultiSync", MB_ICONWARNING); return; }
+        if (!relay::save_config_file(g_iniPath)) { MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWMultiSync", MB_ICONWARNING); return; }
     }
     refresh_config();
 }
@@ -204,14 +204,14 @@ static void cfg_set(const std::string& key, double val) {
 static void set_debug_ui(bool on);
 static void ini_set(const char* key, double val) {
     relay::g_cfg = relay::Cfg();
-    relay::load_config_file(g_iniPath.c_str());
+    relay::load_config_file(g_iniPath);
     relay::set_cfg(key, val);
-    if (!relay::save_config_file(g_iniPath.c_str()))
+    if (!relay::save_config_file(g_iniPath))
         MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWMultiSync", MB_ICONWARNING);
 }
 static void startup_load() {
     relay::g_cfg = relay::Cfg();
-    relay::load_config_file(g_iniPath.c_str());
+    relay::load_config_file(g_iniPath);
     if (!g_dllUp) g_port = relay::g_cfg.ipcPort;   // while connected, keep talking to the port the DLL actually uses
     g_autoInject = relay::g_cfg.autoInject != 0;
     CheckDlgButton(g_wnd, ID_AUTO_CHK, g_autoInject ? BST_CHECKED : BST_UNCHECKED);
@@ -226,11 +226,11 @@ static void startup_load() {
 static void startup_save() {
     // Re-read the file first so live values other tools saved meanwhile are not clobbered.
     relay::g_cfg = relay::Cfg();
-    relay::load_config_file(g_iniPath.c_str());
+    relay::load_config_file(g_iniPath);
     wchar_t pw[16]; GetWindowTextW(H(ID_ST_PORT), pw, 16);
     relay::set_cfg("ipcPort", _wtoi(pw));
     relay::set_cfg("relay",      IsDlgButtonChecked(g_wnd, ID_ST_RELAY) == BST_CHECKED ? 1 : 0);
-    bool ok = relay::save_config_file(g_iniPath.c_str());
+    bool ok = relay::save_config_file(g_iniPath);
     if (!ok) { MessageBoxW(g_wnd, L"swhook.ini の保存に失敗しました。", L"SWMultiSync", MB_ICONWARNING); return; }
     bool portChanged = relay::g_cfg.ipcPort != g_port;
     startup_load();
@@ -419,7 +419,7 @@ static void poll() {
     if (pid && injector::has_module(pid, "swhook.dll")) g_injectedPid = pid;   // however it got there
     else if (pid && g_autoInject && pid != g_injectedPid) {
         std::string err;
-        if (injector::inject(pid, g_dllPath.c_str(), err) != injector::Failed) g_injectedPid = pid;
+        if (injector::inject(pid, g_dllPath, err) != injector::Failed) g_injectedPid = pid;
         if (!err.empty()) g_lastErr = W(err);                // result shows up via the status line
     }
     if (!pid) { g_c.close(); g_port = relay::g_cfg.ipcPort; }   // server gone: next DLL will use the ini's port
@@ -550,7 +550,7 @@ static void on_command(int id) {
     case ID_INJECT_BTN: {
         DWORD pid = injector::find_pid("server64.exe");
         if (!pid) { MessageBoxW(g_wnd, L"server64.exe が起動していません。", L"SWMultiSync", MB_ICONINFORMATION); return; }
-        std::string err; injector::Result r = injector::inject(pid, g_dllPath.c_str(), err);
+        std::string err; injector::Result r = injector::inject(pid, g_dllPath, err);
         if (r == injector::Failed) MessageBoxW(g_wnd, (L"注入に失敗しました:\n" + W(err)).c_str(), L"SWMultiSync", MB_ICONERROR);
         poll(); break; }
     case ID_RELAY_BTN: ipc("relay.set", g_relay ? "\"enabled\":false" : "\"enabled\":true"); poll(); break;

@@ -25,6 +25,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "rec.h"
+#include "../common/u8path.h"
 
 namespace relay {
 
@@ -39,11 +40,11 @@ namespace relay {
 // allocations below); the runtime knobs in Cfg may never exceed these.
 constexpr int    kMaxPerSend = 24;   // buffer-sizing max on records appended to one message
 constexpr int    kMaxRecLen  = 2048; // per-vehicle template cap
-
 // Bound on the prediction horizon of an UNMANAGED native rewrite (pass 1): the server's ETA is kept
 // (up to ~720 ticks out), so without it a coarse-only vehicle would be dead-reckoned ~11 s ahead from
 // a chord velocity (star paths, 目的と設計.md §4-7). No freeze risk: the server re-sends at its ETA.
 constexpr long   kNativeHorizon = 30;
+
 // Runtime-tunable relay knobs (loaded from swhook.ini; see load defaults / set_cfg below). Defaults
 // reproduce the previously hardcoded values, so behaviour is unchanged when no config file exists.
 struct Cfg {
@@ -126,8 +127,8 @@ inline bool set_cfg(const char* k, double v) {
     if (!f) {
         if (!strcmp(k, "hotkeys")) return true;   // removed in 0.2: accepted and ignored for old ini files
         if (!strcmp(k, "lagRatio") || !strcmp(k, "lagMin")) return true;   // pre-I_src model: accepted and ignored
-        return false;
         if (!strcmp(k, "horizonMax")) return true;   // removed: capping a promise pins it and freezes the vehicle
+        return false;
     }
     if (f->isInt) g_cfg.*f->ip = ci(v); else g_cfg.*f->dp = v;
     // clamps
@@ -152,8 +153,8 @@ inline bool set_cfg(const char* k, double v) {
 // Load "key = value" lines from an INI-style config file (blank lines and '#'/';' comments ignored;
 // '=' or whitespace separates key and value). Returns the number of keys applied, or -1 if the file
 // could not be opened (caller keeps defaults). Safe to call again at runtime to hot-reload.
-inline int load_config_file(const char* path) {
-    FILE* f = fopen(path, "rb");
+inline int load_config_file(const std::string& path) {   // UTF-8 path
+    FILE* f = u8path::fopen(path, "rb");
     if (!f) return -1;
     char line[256]; int applied = 0;
     while (fgets(line, sizeof(line), f)) {
@@ -182,10 +183,10 @@ inline void fmt_cfg(const CfgField& f, char* out, size_t n) {
 // line whose key we know gets its value rewritten in place (trailing comment kept); keys absent from
 // the file are appended at the end. Written via a temp file + rename so a crash never truncates the
 // ini. Returns true on success.
-inline bool save_config_file(const char* path) {
+inline bool save_config_file(const std::string& path) {  // UTF-8 path
     std::vector<std::string> out;
     bool seen[kCfgFieldCount] = {false};
-    FILE* f = fopen(path, "rb");
+    FILE* f = u8path::fopen(path, "rb");
     if (f) {
         char line[512];
         while (fgets(line, sizeof line, f)) {
@@ -222,13 +223,12 @@ inline bool save_config_file(const char* path) {
             out.push_back(std::string(kCfgFields[i].name) + " = " + val + "   # " + kCfgFields[i].help);
         }
     }
-    std::string tmp = std::string(path) + ".tmp";
-    FILE* w = fopen(tmp.c_str(), "wb");
+    std::string tmp = path + ".tmp";
+    FILE* w = u8path::fopen(tmp, "wb");
     if (!w) return false;
     for (const std::string& L : out) { fputs(L.c_str(), w); fputs("\r\n", w); }
     fclose(w);
-    remove(path);
-    return rename(tmp.c_str(), path) == 0;
+    return u8path::replace(tmp, path);
 }
 struct Veh {
     bool has = false;

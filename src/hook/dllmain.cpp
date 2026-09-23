@@ -16,6 +16,7 @@
 #include <vector>
 #include "../common/version.h"
 #include "../common/json.h"
+#include "../common/u8path.h"
 #include "steam_min.h"
 #include "rec.h"
 #include "relay.h"
@@ -26,18 +27,17 @@
 // Base directory = the folder swhook.dll lives in (resolved at load from the DLL's own path), so the
 // build is portable: drop swhook.dll + inject.exe next to server64.exe and captures/, logs and
 // swhook.ini all land there. g_base always ends with a backslash. Set once in DllMain.
+// All paths here are UTF-8 (u8path.h): they go out over IPC as-is and are widened for file APIs.
 static HMODULE g_hmod = nullptr;
-static char    g_base[MAX_PATH] = {0};
+constexpr size_t kPathMax = 2048;       // UTF-8 bytes; a MAX_PATH-char wide path fits
+static char    g_base[kPathMax] = {0};
 static const char* BaseDir() {
     if (g_base[0]) return g_base;
-    if (g_hmod && GetModuleFileNameA(g_hmod, g_base, MAX_PATH)) {
-        char* slash = strrchr(g_base, '\\');
-        if (slash) slash[1] = 0; else g_base[0] = 0;
-    }
+    if (g_hmod) strncpy_s(g_base, u8path::module_dir(g_hmod).c_str(), _TRUNCATE);
     if (!g_base[0]) strcpy_s(g_base, ".\\");   // last-resort: current dir
     return g_base;
 }
-// Build "<basedir><suffix>" into caller buffer. suffix uses '\\' separators.
+// Build "<basedir><suffix>" into caller buffer. suffix uses '\' separators.
 static const char* BasePath(char* buf, size_t n, const char* suffix) {
     _snprintf_s(buf, n, _TRUNCATE, "%s%s", BaseDir(), suffix);
     return buf;
@@ -45,8 +45,8 @@ static const char* BasePath(char* buf, size_t n, const char* suffix) {
 
 static FILE* g_log  = nullptr;
 static FILE* g_cap  = nullptr;           // binary container
-static char  g_capPath[MAX_PATH] = {0};  // current .swcap path ("" when none)
-static char  g_logPath[MAX_PATH] = {0};
+static char  g_capPath[kPathMax] = {0};  // current .swcap path ("" when none)
+static char  g_logPath[kPathMax] = {0};
 static CRITICAL_SECTION g_cs;            // guards g_log + g_cap + counters + relay/stats state
 static uint64_t g_seq = 0;               // global, ordered across send+recv
 static uint64_t g_capBytes = 0;
@@ -120,7 +120,7 @@ static void logf(const char* fmt, ...) {
     if (!g_log) {
         char suffix[MAX_PATH];
         _snprintf_s(suffix, _TRUNCATE, "captures\\session_%s.log", g_stamp);
-        g_log = fopen(BasePath(g_logPath, MAX_PATH, suffix), "a");
+        g_log = u8path::fopen(BasePath(g_logPath, kPathMax, suffix), "a");
         if (!g_log) { g_logPath[0] = 0; return; }
         fprintf(g_log, "swhook %s session %s (pid %lu)\n", SWHOOK_VERSION, g_stamp, GetCurrentProcessId());
     }
@@ -208,14 +208,14 @@ static rec::Walk selftest(const uint8_t* body, int blen) {
 // its seq/peer/size/time for cross-referencing. Opened lazily on the first failure (no file when
 // nothing fails). Capped by dumpWalkFailMax frames per session. Caller holds g_cs.
 static FILE* g_wf = nullptr;
-static char  g_wfPath[MAX_PATH] = {0};
+static char  g_wfPath[kPathMax] = {0};
 static void dump_walkfail(uint8_t dir, uint64_t seq, uint64_t sid, int32_t ch, int32_t flags, const rec::Walk& w, const void* data, uint32_t cub) {
     if (!relay::g_cfg.dumpWalkFail) return;
     if (stats::g_walkFailDumped >= (uint64_t)relay::g_cfg.dumpWalkFailMax) return;
     if (!g_wf) {
         char suffix[MAX_PATH];
         _snprintf_s(suffix, _TRUNCATE, "captures\\walkfail_%s.swcap", g_stamp);
-        g_wf = fopen(BasePath(g_wfPath, MAX_PATH, suffix), "wb");
+        g_wf = u8path::fopen(BasePath(g_wfPath, kPathMax, suffix), "wb");
         if (!g_wf) return;
         fwrite("SWCAP\x02", 1, 6, g_wf);
         logf("== walkfail file: %s ==\n", g_wfPath);
@@ -551,8 +551,8 @@ static void open_cap() {
     char suffix[MAX_PATH];
     _snprintf_s(suffix, _TRUNCATE, "captures\\session_%04d%02d%02d_%02d%02d%02d_%03d.swcap",
                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-    BasePath(g_capPath, MAX_PATH, suffix);
-    g_cap = fopen(g_capPath, "wb");
+    BasePath(g_capPath, kPathMax, suffix);
+    g_cap = u8path::fopen(g_capPath, "wb");
     g_capBytes = 0;
     if (g_cap) fwrite("SWCAP\x02", 1, 6, g_cap); else g_capPath[0] = 0;
     logf("== capture file: %s ==\n", g_capPath); logflush();
@@ -581,8 +581,8 @@ static uint64_t write_marker() {
 // Load swhook.ini from the DLL dir. Missing file = keep defaults. Logs the effective values so a
 // live capture records the config used. Caller must hold g_cs.
 static int load_relay_config() {
-    char ini[MAX_PATH];
-    int n = relay::load_config_file(BasePath(ini, MAX_PATH, "swhook.ini"));
+    char ini[kPathMax];
+    int n = relay::load_config_file(BasePath(ini, kPathMax, "swhook.ini"));
     if (n < 0) logf("== config: no swhook.ini, using defaults ==\n");
     else       logf("== config: swhook.ini loaded (%d keys) ==\n", n);
     logf("  ");
@@ -851,8 +851,8 @@ static std::string ipc_handle(const std::string& line) {
         if (t) { CloseHandle(t); w.kvb("ok", true).kvb("hooked", g_hooked); logf("== unload requested (ipc) ==\n"); logflush(); }
         else w.kvb("ok", false).kv("error", "CreateThread failed");
     } else if (cmd == "config.save") {
-        char ini[MAX_PATH];
-        bool ok = relay::save_config_file(BasePath(ini, MAX_PATH, "swhook.ini"));
+        char ini[kPathMax];
+        bool ok = relay::save_config_file(BasePath(ini, kPathMax, "swhook.ini"));
         logf("== config.save -> %s: %s ==\n", ini, ok ? "ok" : "FAILED"); logflush();
         w.kvb("ok", ok).kv("path", ini);
         if (!ok) w.kv("error", "write failed");
@@ -900,8 +900,8 @@ static DWORD WINAPI Worker(LPVOID) {
     char* stamp = g_stamp;
     _snprintf_s(g_stamp, _TRUNCATE, "%04d%02d%02d_%02d%02d%02d",
                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    char p[MAX_PATH], suffix[MAX_PATH];
-    CreateDirectoryA(BasePath(p, MAX_PATH, "captures"), nullptr);
+    char p[kPathMax], suffix[MAX_PATH];
+    u8path::mkdir(BasePath(p, kPathMax, "captures"));
 
     // Config first: it decides the startup mode (auto-relay / capture on-off / ipc port / log).
     // The .log opens lazily inside logf() once cfg.log is known.
@@ -911,7 +911,7 @@ static DWORD WINAPI Worker(LPVOID) {
     g_capturing = relay::g_cfg.capture != 0;      // auto-start capture unless disabled
     if (g_capturing) {
         _snprintf_s(suffix, _TRUNCATE, "captures\\session_%s.swcap", stamp);
-        g_cap = fopen(BasePath(g_capPath, MAX_PATH, suffix), "wb");
+        g_cap = u8path::fopen(BasePath(g_capPath, kPathMax, suffix), "wb");
         if (g_cap) fwrite("SWCAP\x02", 1, 6, g_cap); else g_capPath[0] = 0;
     }
     logf("== startup: relay=%s capture=%s ==\n", g_relay ? "ON" : "OFF", g_capturing ? "ON" : "OFF");

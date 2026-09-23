@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include "../common/u8path.h"
 
 namespace injector {
 
@@ -34,14 +35,8 @@ inline bool has_module(DWORD pid, const char* name) {
     return found;
 }
 
-// Directory of the running executable, with trailing backslash.
-inline std::string exe_dir() {
-    char buf[MAX_PATH];
-    GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    char* slash = strrchr(buf, '\\');
-    if (slash) slash[1] = 0;
-    return buf;
-}
+// Directory of the running executable (UTF-8), with trailing backslash.
+inline std::string exe_dir() { return u8path::module_dir(nullptr); }
 // Path of swhook.dll next to the running executable.
 inline std::string default_dll_path() { return exe_dir() + "swhook.dll"; }
 
@@ -61,22 +56,23 @@ enum Result { Injected = 0, Failed = 1, AlreadyLoaded = 2 };
 // VirtualAllocEx/Free (PROCESS_VM_OPERATION), WriteProcessMemory (PROCESS_VM_WRITE).
 // Avoiding PROCESS_ALL_ACCESS also lowers the "textbook injector" score AV heuristics assign.
 #define SWHOOK_INJECT_ACCESS (PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE)
-inline Result inject(DWORD pid, const char* dll, std::string& err) {
+// `dll` is UTF-8; it goes to the target as UTF-16 via LoadLibraryW, so a path with characters
+// outside the system code page (e.g. Japanese on a non-Japanese locale) still loads.
+inline Result inject(DWORD pid, const std::string& dll, std::string& err) {
     char msg[512];
-    if (GetFileAttributesA(dll) == INVALID_FILE_ATTRIBUTES) {
-        snprintf(msg, sizeof msg, "dll not found: %s", dll); err = msg; return Failed;
-    }
+    if (!u8path::exists(dll)) { err = "dll not found: " + dll; return Failed; }
+    std::wstring wdll = u8path::widen(dll);
     if (has_module(pid, "swhook.dll")) { err = "swhook.dll is already loaded"; return AlreadyLoaded; }
 
     HANDLE p = OpenProcess(SWHOOK_INJECT_ACCESS, FALSE, pid);
     if (!p) { snprintf(msg, sizeof msg, "OpenProcess failed %lu (run as admin)", GetLastError()); err = msg; return Failed; }
 
-    size_t len = strlen(dll) + 1;
+    size_t len = (wdll.size() + 1) * sizeof(wchar_t);
     void* rem = VirtualAllocEx(p, nullptr, len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!rem) { err = "VirtualAllocEx failed"; CloseHandle(p); return Failed; }
-    WriteProcessMemory(p, rem, dll, len, nullptr);
+    WriteProcessMemory(p, rem, wdll.c_str(), len, nullptr);
 
-    auto load = GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
+    auto load = GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryW");
     HANDLE t = CreateRemoteThread(p, nullptr, 0, (LPTHREAD_START_ROUTINE)load, rem, 0, nullptr);
     if (!t) {
         snprintf(msg, sizeof msg, "CreateRemoteThread failed %lu", GetLastError()); err = msg;

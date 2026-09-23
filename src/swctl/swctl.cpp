@@ -168,7 +168,7 @@ static int cmd_inject(int argc, char** argv) {
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--wait") || !strcmp(argv[i], "-w")) wait = true;
         else if (!strcmp(argv[i], "--pid") && i + 1 < argc) pid = (DWORD)atoi(argv[++i]);
-        else dll = argv[i];
+        else dll = u8path::from_acp(argv[i]);
     }
     if (dll.empty()) dll = injector::default_dll_path();
     if (!injector::is_admin()) fprintf(stderr, "warning: not running as administrator; OpenProcess will likely fail\n");
@@ -179,7 +179,7 @@ static int cmd_inject(int argc, char** argv) {
         if (!pid) { fprintf(stderr, "server64.exe is not running\n"); return 1; }
     }
     std::string err;
-    injector::Result res = injector::inject(pid, dll.c_str(), err);
+    injector::Result res = injector::inject(pid, dll, err);
     if (res == injector::Injected) printf("injected %s into pid %lu\n", dll.c_str(), pid);
     else if (res == injector::AlreadyLoaded) printf("already injected (pid %lu)\n", pid);
     else { fprintf(stderr, "inject failed: %s\n", err.c_str()); return 1; }
@@ -191,7 +191,7 @@ static int cmd_inject(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);   // player names (peers[].name) are UTF-8
-    relay::load_config_file((injector::exe_dir() + "swhook.ini").c_str());   // absent/unreadable: keep 28215
+    relay::load_config_file(injector::exe_dir() + "swhook.ini");   // absent/unreadable: keep 28215
     g_port = relay::g_cfg.ipcPort;
     int i = 1;
     for (; i < argc; i++) {
