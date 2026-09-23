@@ -286,8 +286,7 @@ static std::map<uint64_t, Hold> g_hold;                       // under g_cs
 struct Nudge {
     std::vector<uint8_t> recs; int count = 0; std::string kind;
     uint64_t notBeforeMs = 0;                                 // deliver on the first type=8 send at/after this
-    bool reload = false; int32_t tx = 0, tz = 0;              // "reload": this is the 0x46 half; queue the 0x45 half after delivery
-    uint8_t loadFlag = 0;                                     // trailing u8 of that follow-up 0x45 (see on_unstuck)
+    std::vector<uint8_t> follow; int followCount = 0;         // queued kReloadGapMs after delivery ("reload": the 0x45 half)
 };
 static std::map<uint64_t, Nudge> g_nudge;                     // under g_cs; consumed by the next type=8 send
 static void put_u32(std::vector<uint8_t>& v, uint32_t x) { v.insert(v.end(), reinterpret_cast<uint8_t*>(&x), reinterpret_cast<uint8_t*>(&x) + 4); }
@@ -296,18 +295,24 @@ static int32_t tile_of(double c) { return (int32_t)floor((c + 500.0) / 1000.0); 
 // Trailing u8 (= purchased) of the last 0x45 the server itself sent for each tile. The tile stream is
 // broadcast identically to every peer, so one map serves all; ?unstuck re-sends it (1 if never seen).
 static std::map<std::pair<int32_t, int32_t>, uint8_t> g_tileFlag;
+static void put_tile_load(std::vector<uint8_t>& v, int32_t tx, int32_t tz) {   // SEND 0x45 with the tile's own flag
+    auto tf = g_tileFlag.find({ tx, tz });
+    put_u32(v, 0x45); put_u32(v, (uint32_t)tx); put_u32(v, (uint32_t)tz); v.push_back(tf != g_tileFlag.end() ? tf->second : 1);
+}
+static void put_tile_unload(std::vector<uint8_t>& v, int32_t tx, int32_t tz) { put_u32(v, 0x46); put_u32(v, (uint32_t)tx); put_u32(v, (uint32_t)tz); }
 
 // ---- player self-help: `?unstuck` / `?unstuck2` ----
 // For the "ghost chunk" stall: the client stops simulating the world on entering a tile while its
 // network thread keeps running (tools/swcap/README.md). `?` lines go to addons and never reach the
 // chat, so the game ignores these and the DLL — which only watches the client 0x02 — queues, on the
-// same g_nudge path as debug.nudge, for the tile under the player's last pose: `?unstuck` a 0x45 load,
+// same g_nudge path as debug.nudge, for the 5x5 tiles around the player's last pose (the ring a teleport streams): `?unstuck` a 0x45 load,
 // `?unstuck2` a 0x46 unload then the 0x45 kReloadGapMs later (forced reload); plus a 0x01 chat line to
-// that player alone so they see it was taken. The 0x45 carries u8 = 1: with 0 the client re-created the
+// that player alone so they see it was taken. Each 0x45 carries the tile's last server-sent u8 (1 if never seen): with 0 the client re-created the
 // tile as unpurchased (workbench unusable) on both variants — the server only ever sends 1, for tiles it
 // keeps as purchased (the ones with a workbench, it seems); a teleport away and back restored it. Always on (players help themselves, no admin needed);
 // per-peer cooldown; every use is logged and marked. Both variants stay until one proves enough.
 constexpr uint64_t kUnstuckCooldownMs = 5000;
+constexpr int kUnstuckRadius = 2;                             // 5x5 = the ring the server itself streams on a teleport
 static std::map<uint64_t, uint64_t> g_unstuckMs;              // sid -> last accepted use
 // 1 = "?unstuck", 2 = "?unstuck2", 0 = anything else (exact match: case and blanks count)
 static int unstuck_cmd(const uint8_t* s, int n) {
@@ -327,18 +332,18 @@ static void on_unstuck(uint64_t sid, const stats::Peer& ps, int mode, uint64_t n
     int32_t tx = tile_of(ps.px), tz = tile_of(ps.pz);
     bool reload = mode == 2;
     Nudge nd; nd.kind = reload ? "unstuck/0x46" : "unstuck/0x45";
-    put_u32(nd.recs, reload ? 0x46 : 0x45); put_u32(nd.recs, (uint32_t)tx); put_u32(nd.recs, (uint32_t)tz);
-    auto tf = g_tileFlag.find({ tx, tz });
-    uint8_t flag = tf != g_tileFlag.end() ? tf->second : 1;
-    if (!reload) nd.recs.push_back(flag);
-    nd.loadFlag = flag;
-    char msg[96]; _snprintf_s(msg, _TRUNCATE, "reloading tile (%d, %d)", tx, tz);
-    put_chat(nd.recs, msg, "[SW_MultiSync]");
-    nd.count = 2; nd.reload = reload; nd.tx = tx; nd.tz = tz;
+    for (int32_t x = tx - kUnstuckRadius; x <= tx + kUnstuckRadius; ++x)
+        for (int32_t z = tz - kUnstuckRadius; z <= tz + kUnstuckRadius; ++z) {
+            if (reload) { put_tile_unload(nd.recs, x, z); put_tile_load(nd.follow, x, z); ++nd.followCount; }
+            else put_tile_load(nd.recs, x, z);
+            ++nd.count;
+        }
+    char msg[96]; _snprintf_s(msg, _TRUNCATE, "reloading tiles around (%d, %d)", tx, tz);
+    put_chat(nd.recs, msg, "[SW_MultiSync]"); ++nd.count;
     g_nudge[sid] = std::move(nd);
     uint64_t mk = write_marker();
-    logf("== unstuck: peer=%llu name=\"%s\" pos=(%.1f,%.1f,%.1f) tile=(%d,%d) flag=%u%s mode=%d mark=%llu ==\n", (unsigned long long)sid,
-         ps.name.c_str(), ps.px, ps.py, ps.pz, tx, tz, (unsigned)flag, tf != g_tileFlag.end() ? "" : " (default)", mode, (unsigned long long)mk);
+    logf("== unstuck: peer=%llu name=\"%s\" pos=(%.1f,%.1f,%.1f) tile=(%d,%d) r=%d mode=%d mark=%llu ==\n", (unsigned long long)sid,
+         ps.name.c_str(), ps.px, ps.py, ps.pz, tx, tz, kUnstuckRadius, mode, (unsigned long long)mk);
     logflush();
 }
 
@@ -469,9 +474,9 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
             EnterCriticalSection(&g_cs);
             logf("== nudge %s delivered: peer=%llu tick=%u +%d records (%u B) ==\n", nudge.kind.c_str(), (unsigned long long)sid, tick, nudge.count, (unsigned)nudge.recs.size());
             logflush();
-            if (nudge.reload) {                               // second half of "reload": the 0x45 a few ticks later
+            if (nudge.followCount) {                          // second half of "reload": the 0x45s a few ticks later
                 Nudge f; f.kind = "reload/0x45"; f.notBeforeMs = GetTickCount64() + kReloadGapMs;
-                put_u32(f.recs, 0x45); put_u32(f.recs, (uint32_t)nudge.tx); put_u32(f.recs, (uint32_t)nudge.tz); f.recs.push_back(nudge.loadFlag); f.count = 1;
+                f.recs = std::move(nudge.follow); f.count = nudge.followCount;
                 g_nudge[sid] = std::move(f);
             }
             LeaveCriticalSection(&g_cs);
@@ -816,9 +821,10 @@ static std::string ipc_handle(const std::string& line) {
                     int32_t tx = tile_of(x), tz = tile_of(z);
                     if (json::get_num(line.c_str(), "tileX", x)) tx = (int32_t)x;
                     if (json::get_num(line.c_str(), "tileZ", z)) tz = (int32_t)z;
-                    if (kind == "tile") { put32(0x45); put32((uint32_t)tx); put32((uint32_t)tz); nd.recs.push_back(0); }
-                    else                { put32(0x46); put32((uint32_t)tx); put32((uint32_t)tz); }
-                    nd.count = 1; nd.tx = tx; nd.tz = tz; nd.reload = (kind == "reload");
+                    if (kind == "tile") put_tile_load(nd.recs, tx, tz);
+                    else                put_tile_unload(nd.recs, tx, tz);
+                    if (kind == "reload") { put_tile_load(nd.follow, tx, tz); nd.followCount = 1; }
+                    nd.count = 1;
                 }
             } else if (kind == "raw") {
                 json::get_num(line.c_str(), "count", cnt);
