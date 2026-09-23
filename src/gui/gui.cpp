@@ -289,6 +289,20 @@ static std::wstring freeze_text(const char* p, double now, bool detail = false) 
                     N(fz, "poseVeh"), N(fz, "defReqs"), N(fz, "defAcks")) + (ids.empty() ? L"" : L"  未ack定義 [" + ids + L"]");
 }
 
+// Client sync report for one peers[] entry (sync{} from the 1 Hz 0x34 heartbeat, see ipc-protocol.md):
+// behind = "+N f" frames behind as the client reports it (what the in-game player list shows),
+// lag = server tick - client tick, tps = client sim rate. All "-" once the heartbeat is stale.
+struct SyncCells { std::wstring behind = L"-", lag = L"-", tps = L"-"; };
+static SyncCells sync_cells(const char* p, double now) {
+    SyncCells c;
+    const char* sy = json::find_value(p, "sync");
+    if (!sy || now - N(sy, "hbMs") >= 3000) return c;
+    c.behind = N(sy, "clientTick") ? fmtw(L"+%.0ff", N(sy, "framesBehind")) : L"読込中";
+    c.lag = fmtw(L"%.0f", N(sy, "tickLag"));
+    c.tps = fmtw(L"%.0f", N(sy, "clientTps"));
+    return c;
+}
+
 static void render_debug() {
     if (!g_debugUi) return;
     const char* o = g_peersJson.c_str();
@@ -299,7 +313,8 @@ static void render_debug() {
         double ago = (now - N(p, "lastSeenMs")) / 1000;
         if (ago > kPeerDropSec) return;
         double pos[3] = {0,0,0}; bool hasPos = json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3;
-        rows.push_back({ W(std::to_string(id)), name_of(id), hasPos ? fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-", freeze_text(p, now, true) });
+        SyncCells sc = sync_cells(p, now);
+        rows.push_back({ W(std::to_string(id)), name_of(id), sc.behind, sc.lag, sc.tps, hasPos ?fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-", freeze_text(p, now, true) });
     });
     lv_fill(H(ID_DBG_LV), rows);
     bool sel = ListView_GetNextItem(H(ID_DBG_LV), -1, LVNI_SELECTED) >= 0;
@@ -341,15 +356,8 @@ static void render_peers() {
         bool conn = B(p, "connected");
         double t3 = N(p, "type3"), rwf = N(p, "rwalkFull"), pos[3] = {0,0,0};
         bool hasPos = json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3;
-        // client sync report (1 Hz heartbeat): "+N f" = frames behind as the client reports it (what the
-        // in-game player list shows), then server tick - client tick; "-" once the heartbeat is stale
-        const char* sy = json::find_value(p, "sync");
-        std::wstring lag = L"-", tps = L"-";
-        if (sy && now - N(sy, "hbMs") < 3000) {
-            lag = N(sy, "clientTick") ? fmtw(L"+%.0ff (%.0f)", N(sy, "framesBehind"), N(sy, "tickLag")) : L"読込中";
-            tps = fmtw(L"%.0f", N(sy, "clientTps"));
-        }
-        rows.push_back({ name_of(id), W(ids), conn ? L"接続中" : L"切断", lag, tps, bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
+        SyncCells sc = sync_cells(p, now);
+        rows.push_back({ name_of(id), W(ids), conn ? L"接続中" : L"切断", sc.behind, sc.lag, sc.tps,bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
                          fmtw(L"%.1f%%", t8 ? 100.0 * wf / t8 : 0), fmtw(L"%.1f%%", t3 ? 100.0 * rwf / t3 : 0),
                          hasPos ? fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-",
                          fmtw(L"%.0f", N(p, "vehicles")), fmtw(L"%.0f 秒前", ago), freeze_text(p, now) });
@@ -469,7 +477,7 @@ static void build_ui() {
     mk(L"STATIC", L"", 0, X + 316, Y + 22, WID - 316, 18, ID_WALK_TXT, 0);
     mk(L"STATIC", L"参加プレイヤー", 0, X, Y + 66, 400, 18, ID_PEERS_LBL, 0);
     HWND pl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 86, WID, 176, ID_PEERS_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(pl, { {L"名前", 110}, {L"SteamID", 125}, {L"状態", 50}, {L"遅延 (tick差)", 85}, {L"TPS", 40}, {L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40},{L"最終通信", 60}, {L"凍結検知", 110} });
+    lv_cols(pl, { {L"名前", 110}, {L"SteamID", 125}, {L"状態", 50}, {L"遅延(申告)", 70}, {L"tick差", 50}, {L"TPS", 40},{L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40},{L"最終通信", 60}, {L"凍結検知", 110} });
     mk(L"STATIC", L"車両", 0, X, Y + 272, 640, 18, ID_VEH_LBL, 0);
     mk(L"BUTTON", L"車両一覧を表示（デバッグ用）", WS_TABSTOP | BS_AUTOCHECKBOX, X + WID - 220, Y + 270, 220, 22, ID_VEH_CHK, 0);
     HWND vl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 292, WID, 220, ID_VEH_LV, 0, WS_EX_CLIENTEDGE);
@@ -502,7 +510,7 @@ static void build_ui() {
        0, X, Y, WID, 18, ID_DBG_NOTE, kDebugTab);
     mk(L"STATIC", L"プレイヤー", 0, X, Y + 26, WID, 18, ID_DBG_LBL, kDebugTab);
     HWND dl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER, X, Y + 46, WID, 200, ID_DBG_LV, kDebugTab, WS_EX_CLIENTEDGE);
-    lv_cols(dl, { {L"SteamID", 140}, {L"名前", 110}, {L"位置 (x, y, z)", 150}, {L"凍結検知（pose静止 / 車両定義の未ack）", 450} });
+    lv_cols(dl, { {L"SteamID", 140}, {L"名前", 110}, {L"遅延(申告)", 70}, {L"tick差", 50}, {L"TPS", 40}, {L"位置 (x, y, z)", 150}, {L"凍結検知（pose静止 / 車両定義の未ack）", 450} });
     mk(L"STATIC", L"通信遮断 (debug.hold)：このプレイヤー宛の送信を指定 ms 間すべて棄却（再送しない）。同期の穴に対する挙動の実験用。", 0, X, Y + 258, WID, 18, ID_DBG_HOLD_LBL, kDebugTab);
     mk(L"EDIT", L"5000", WS_TABSTOP | ES_NUMBER, X, Y + 280, 80, 24, ID_DBG_HOLD_MS, kDebugTab, WS_EX_CLIENTEDGE);
     mk(L"BUTTON", L"遮断開始 (ms)", WS_TABSTOP | BS_PUSHBUTTON, X + 88, Y + 279, 130, 26, ID_DBG_HOLD, kDebugTab);

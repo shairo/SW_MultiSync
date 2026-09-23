@@ -97,8 +97,8 @@ static std::map<std::string, PeerSample> g_prev; static double g_prevMs = 0;
 static void print_peers(const std::string& r, bool rates) {
     const char* o = r.c_str();
     double now = N(o, "nowMs"); double dt = (g_prevMs && now > g_prevMs) ? (now - g_prevMs) / 1000.0 : 0;
-    printf("%-18s %-5s %9s %9s %9s %7s %7s %5s %6s %-10s %4s %-26s %-8s %-20s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
-           rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "rwalk%", "vehs", "type8", "behind/lag", "tps", "pos (x y z)", "last", "freeze", "name");
+    printf("%-18s %-5s %9s %9s %9s %7s %7s %5s %6s %-8s %6s %4s %-26s %-8s %-20s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
+           rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "rwalk%", "vehs", "type8", "behind", "lag", "tps", "pos (x y z)", "last", "freeze", "name");
     json::for_each_elem(json::find_value(o, "peers"), [&](const char* p) {
         std::string id = ID(p, "steamId");
         bool conn = false; json::get_bool(p, "connected", conn);
@@ -109,11 +109,12 @@ static void print_peers(const std::string& r, bool rates) {
         double t3 = N(p, "type3"), rwf = N(p, "rwalkFull"), pos[3] = {0,0,0}; char posS[40];
         if (json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3) snprintf(posS, sizeof posS, "%.0f %.0f %.0f", pos[0], pos[1], pos[2]); else strcpy(posS, "-");
         // freeze detector verdict (freeze.h): "-" healthy, else reason + how long; "ok (N past)" after recovery
-        // client sync report (0x34 heartbeat): "+Nf/L" = client-reported frames behind / server tick - client tick
-        char lag[24] = "-", tps[8] = "-";
+        // client sync report (0x34 heartbeat): behind = client-reported "+N f", lag = server tick - client tick
+        char behind[16] = "-", lag[16] = "-", tps[8] = "-";
         const char* sy = json::find_value(p, "sync");
         if (sy && now - N(sy, "hbMs") < 3000) {
-            if (N(sy, "clientTick")) snprintf(lag, sizeof lag, "+%.0ff/%.0f", N(sy, "framesBehind"), N(sy, "tickLag")); else strcpy(lag, "loading");
+            if (N(sy, "clientTick")) snprintf(behind, sizeof behind, "+%.0ff", N(sy, "framesBehind")); else strcpy(behind, "loading");
+            snprintf(lag, sizeof lag, "%.0f", N(sy, "tickLag"));
             snprintf(tps, sizeof tps, "%.0f", N(sy, "clientTps"));
         }
         char frz[48] = "-", ago[24];
@@ -124,9 +125,9 @@ static void print_peers(const std::string& r, bool rates) {
             if (since > 0) snprintf(frz, sizeof frz, "FROZEN %s %.0fs", S(fz, "reason").c_str(), (now - since) / 1000);
             else if (ev > 0) snprintf(frz, sizeof frz, "ok (%.0f past)", ev);
         }
-        printf("%-18s %-5s %9s %9s %9s %6.1f%% %6.1f%% %5.0f %6.0f %-10s %4s %-26s %-8s %-20s %s\n", id.c_str(), conn ? "yes" : "no",
+        printf("%-18s %-5s %9s %9s %9s %6.1f%% %6.1f%% %5.0f %6.0f %-8s %6s %4s %-26s %-8s %-20s %s\n", id.c_str(), conn ? "yes" : "no",
                fmt_bytes(vs).c_str(), fmt_bytes(vi).c_str(), fmt_bytes(vr).c_str(),
-               t8 ? 100.0 * wf / t8 : 0, t3 ? 100.0 * rwf / t3 : 0, N(p, "vehicles"), t8, lag, tps, posS, ago, frz,
+               t8 ? 100.0 * wf / t8 : 0, t3 ? 100.0 * rwf / t3 : 0, N(p, "vehicles"), t8, behind, lag, tps, posS, ago, frz,
                S(p, "name").empty() ? "-" : S(p, "name").c_str());
     });
     g_prevMs = now;
