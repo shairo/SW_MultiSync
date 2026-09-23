@@ -314,9 +314,7 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
     int newcub = 0; uint8_t* inj = nullptr;
     if (type8) {
         ps.type8++;
-        if (tick < ps.lastTick) {          // world tick went backwards: the relay guard leaves such frames untouched
-            if (++ps.tickRewinds <= 10) { logf("== tick rewind to %llu: %u < %u (#%llu) ==\n", (unsigned long long)sid, tick, ps.lastTick, (unsigned long long)ps.tickRewinds); logflush(); }
-        } else ps.lastTick = tick;
+        if (tick > ps.lastTick) ps.lastTick = tick;
         rec::Walk w = selftest(body, blen);
         full = w.full;
         if (full) ps.walkFull++; else { ps.walkPartial++; dump_walkfail(0, n, sid, ch, flags, w, data, cub); }
@@ -430,6 +428,11 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                         int L = rec::decode_client_len(body, blen, off); if (L <= 0) break;
                         if (body[off] == 0x1B) freeze::on_defreq(sid, rec::U32(body, blen, off + 4), now);
                         else if (body[off] == 0x29) freeze::on_defack(sid, rec::U32(body, blen, off + 4), now);
+                        else if (body[off] == 0x34) {   // heartbeat: u32 clientTick · u32 0 · u32 clientTps · u32 framesBehind
+                            ps.cliTick = rec::U32(body, blen, off + 4); ps.cliTps = rec::U32(body, blen, off + 12);
+                            ps.cliBehind = rec::U32(body, blen, off + 16); ps.hbMs = now;
+                            ps.tickLag = ps.lastTick > ps.cliTick ? ps.lastTick - ps.cliTick : 0;
+                        }
                         off += L;
                     }
                     int verdict = freeze::check(sid, now, relay::g_cfg.freezePoseMs, relay::g_cfg.freezeDefMs);
@@ -533,8 +536,10 @@ static void write_peers(json::JsonW& w) {
          .kv("recvCount", p.recvCount).kv("recvBytes", p.recvBytes)
          .kv("injSends", p.injSends).kv("injBytes", p.injBytes).kv("injRecords", p.injRecords)
          .kv("type8", p.type8).kv("walkFull", p.walkFull).kv("walkPartial", p.walkPartial)
-         .kv("tickRewinds", p.tickRewinds).kv("vehicles", vehs)
+         .kv("vehicles", vehs)
          .kv("type3", p.type3).kv("rwalkFull", p.rwalkFull).kv("rwalkPartial", p.rwalkPartial);
+        if (p.hbMs) w.key("sync").obj().kv("clientTick", p.cliTick).kv("clientTps", p.cliTps)
+                       .kv("framesBehind", p.cliBehind).kv("tickLag", p.tickLag).kv("hbMs", p.hbMs).end();
         if (p.posMs) w.key("pos").arr().num(p.px).num(p.py).num(p.pz).end().kv("posMs", p.posMs);
         auto fit = freeze::g_peers.find(kv.first);
         if (fit != freeze::g_peers.end()) {

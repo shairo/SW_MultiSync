@@ -53,8 +53,8 @@ captureBytes logFile walkFailFile ipcPort ipcClients ipcRequests peerCount vehic
 
 ### peers[] entry
 `steamId name connected firstSeenMs lastSeenMs lastTick sendCount sendBytes recvCount recvBytes
-injSends injBytes injRecords type8 walkFull walkPartial tickRewinds vehicles
-type3 rwalkFull rwalkPartial [pos[3] posMs]`
+injSends injBytes injRecords type8 walkFull walkPartial vehicles
+type3 rwalkFull rwalkPartial [sync{…}] [pos[3] posMs]`
 `name` is the in-game player name (UTF-8) from the client's join request (RECV msgType=1, see
 `protocol/transport.md`); `""` for players who joined before the DLL was injected.
 `type3`/`rwalkFull`/`rwalkPartial` are the client→server (msgType=3) counterparts of the walk KPI;
@@ -67,8 +67,12 @@ client-freeze detector (`src/hook/freeze.h`, thresholds `freezePoseMs` / `freeze
 definition the server pushed in answer to the client's 0x1B request has had no 0x29 loaded-ack for
 `unackedMs`), or both. `pendingDefs` lists the unacked vehicle ids. Each onset also writes a
 `FREEZE?` line to the session .log and a capture marker. Present only for peers that sent a pose.
-`tickRewinds` counts type=8 frames whose world tick was below the highest seen for that peer
-(a server resend/rewind; the relay never touches those frames). Expected to stay 0.
+`sync{clientTick clientTps framesBehind tickLag hbMs}` — the client's own sync report from its ~1 Hz
+0x34 heartbeat (`protocol/client.md`; the server relays the same clientTps / framesBehind in its 0x05
+player-list row, which is what the in-game player list shows as TPS / "+N f"). `clientTick` is the last
+world tick the client simulated (0 while it is still loading after a join); `tickLag` = `lastTick` −
+`clientTick` when the heartbeat arrived; `hbMs` its GetTickCount64 stamp — treat the block as stale if
+it is more than a couple of seconds old. Absent until the first heartbeat.
 `sendBytes` = what the game itself sent this peer (native); `injBytes` = extra bytes we added on
 top. `connected` is false after the ch15 close byte or 5 s without any traffic to that peer; peers silent
 for over 10 minutes are dropped from the list (and from the DLL's table). Counters are per DLL lifetime.

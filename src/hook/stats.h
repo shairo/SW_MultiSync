@@ -25,7 +25,12 @@ struct Peer {
     uint64_t posMs = 0;                // GetTickCount64 of the last 0x2F; 0 = never
     std::string name;                  // in-game player name from the client's join request (RECV msgType=1); "" = not seen
     uint32_t lastTick = 0;             // highest world tick seen in a type=8 to this peer
-    uint64_t tickRewinds = 0;          // type=8 whose tick was below lastTick (server resend/rewind; never seen so far)
+    // client sync report, from its 1 Hz 0x34 heartbeat (protocol/client.md); hbMs 0 = none yet
+    uint32_t cliTick = 0;              // last world tick the client simulated (0 while loading)
+    uint32_t cliTps = 0, cliBehind = 0; // client-measured sim rate / client-reported frames behind (the values the server
+                                       // relays in its 0x05 player-list row)
+    uint32_t tickLag = 0;              // lastTick - cliTick when the heartbeat arrived
+    uint64_t hbMs = 0;
 };
 
 inline std::map<uint64_t, Peer> g_peers;

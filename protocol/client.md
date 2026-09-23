@@ -32,7 +32,7 @@ The client-side records don't carry it; the server stamps it.
 | 0x1B | 8 | **vehicle definition REQUEST** (answer to a SEND 0x2B placement; one per vehicle) | tag+3 · u32 vehId — server answers with a ch1 msgType=12 definition push; see lifecycle.md "Vehicle definition handshake" |
 | 0x29 | 8 | **vehicle LOADED ack** (after the definition arrived and the client built the vehicle) | tag+3 · u32 vehId — only then does the server send that vehicle's 0x2D/0x2F state to this client |
 | 0x04 | 5 | follows almost every 0x2F | tag · u32 = 0 |
-| 0x34 | 24 | **1 Hz heartbeat** | tag+3 · u32 counter (+60 per record = client tick) · u32 0 · u32 0x3E · u32 2 · u32 0 |
+| 0x34 | 24 | **1 Hz heartbeat = the client's sync report** | tag+3 · u32 **clientTick** (last world tick the client has simulated; frozen while it receives nothing, 0 while loading) · u32 0 · u32 **clientTps** (client-measured sim rate, 35..62) · u32 **framesBehind** (client-reported, usually 1..7; 165 right after a join) · u32 0. The server copies clientTps/framesBehind verbatim into that player's SEND 0x05 row (reference.md). serverTick − clientTick at receipt ≈ 2..8 normally (session_20260913_214246_776, 20260923_135519) |
 | 0x0A | 40+n | **component INTERACT (press / release)** | tag+3 · u32 vehId · u32 0 · i32 voxelX · i32 voxelY · i32 voxelZ · u8 pressed(1=down,0=up) · f32[3] hit offset within voxel (±0.125) · u8 0 · u16 n · name[n] |
 | 0x0B | 32 | **keypad value set** | tag+3 · u32 vehId · u32 0 · i32 voxelX/Y/Z · f32 value · u32 valueIndex |
 | 0x51 | 42 | **held-item state** (sent on every change) | tag+3 · u32 hotbarIdx · u32 itemId · f32 battery% · u32 100 · u8 aiming/active · i32 -1 · u32 0 · u8 0 · f32[3] view dir (zero when part of a swap) |

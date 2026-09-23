@@ -24,7 +24,7 @@ vehicle's dETA looks huge only because distant-observer records are mixed in). S
 ## Periodic / always-on tags — length known, meaning TBD
 | tag | length | notes |
 |-----|--------|-------|
-| 0x05 5   | fixed 34 | periodic; u32 id (=0x3E) + 26 B mostly zero |
+| 0x05 5   | fixed 34 | **player-list / netstat row** (the in-game player list: TPS, "+Nf", ping). Every 16 ticks, one record per player plus a peer_id 0 row (server itself, zeros), broadcast to everyone: tag · u32 serverTps (62 = "SERVER: 62 TPS") · u16 peer_id · u32 clientTps · u32 framesBehind (both copied from that client's 0x34) · 8 B zero · u32 **serverLag** (server tick − the client's reported tick; ≈ framesBehind+2, thousands while a joining client is still loading) · u32 **ping ms** (6–7 local, 17–18 remote; stable per peer). Which of framesBehind/serverLag the UI prints as "+Nf" is not pinned yet (session_20260913_214246_776, 20260923_135519) |
 | 0x07 7   | fixed 71 | seat-entry snapshot broadcast: tag · u16 peer_id · zeros · f32 yaw · f32 pitch · zeros — mirror of client 0x01 (client.md) |
 | 0x09 9   | fixed 4  | bare tag / flag |
 | 0x62 98  | fixed 12 | vehicle load companion: tag · u32 20000 · u32 5 — one per 0x2B placement (lifecycle.md) |

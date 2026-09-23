@@ -341,10 +341,18 @@ static void render_peers() {
         bool conn = B(p, "connected");
         double t3 = N(p, "type3"), rwf = N(p, "rwalkFull"), pos[3] = {0,0,0};
         bool hasPos = json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3;
-        rows.push_back({ name_of(id), W(ids), conn ? L"接続中" : L"切断", bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
+        // client sync report (1 Hz heartbeat): "+N f" = frames behind as the client reports it (what the
+        // in-game player list shows), then server tick - client tick; "-" once the heartbeat is stale
+        const char* sy = json::find_value(p, "sync");
+        std::wstring lag = L"-", tps = L"-";
+        if (sy && now - N(sy, "hbMs") < 3000) {
+            lag = N(sy, "clientTick") ? fmtw(L"+%.0ff (%.0f)", N(sy, "framesBehind"), N(sy, "tickLag")) : L"読込中";
+            tps = fmtw(L"%.0f", N(sy, "clientTps"));
+        }
+        rows.push_back({ name_of(id), W(ids), conn ? L"接続中" : L"切断", lag, tps, bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
                          fmtw(L"%.1f%%", t8 ? 100.0 * wf / t8 : 0), fmtw(L"%.1f%%", t3 ? 100.0 * rwf / t3 : 0),
                          hasPos ? fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-",
-                         fmtw(L"%.0f", N(p, "vehicles")), fmtw(L"%.0f", N(p, "tickRewinds")), fmtw(L"%.0f 秒前", ago), freeze_text(p, now) });
+                         fmtw(L"%.0f", N(p, "vehicles")), fmtw(L"%.0f 秒前", ago), freeze_text(p, now) });
     });
     if (dt) { g_rateSend = (totS - g_prevTotal.sendBytes) / dt; g_rateInj = (totI - g_prevTotal.injBytes) / dt; }
     g_prevTotal = { totS, totI, 0 }; g_prevMs = now;
@@ -461,7 +469,7 @@ static void build_ui() {
     mk(L"STATIC", L"", 0, X + 316, Y + 22, WID - 316, 18, ID_WALK_TXT, 0);
     mk(L"STATIC", L"参加プレイヤー", 0, X, Y + 66, 400, 18, ID_PEERS_LBL, 0);
     HWND pl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 86, WID, 176, ID_PEERS_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(pl, { {L"名前", 110}, {L"SteamID", 125}, {L"状態", 50}, {L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40}, {L"tick巻戻", 55}, {L"最終通信", 60}, {L"凍結検知", 110} });
+    lv_cols(pl, { {L"名前", 110}, {L"SteamID", 125}, {L"状態", 50}, {L"遅延 (tick差)", 85}, {L"TPS", 40}, {L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40},{L"最終通信", 60}, {L"凍結検知", 110} });
     mk(L"STATIC", L"車両", 0, X, Y + 272, 640, 18, ID_VEH_LBL, 0);
     mk(L"BUTTON", L"車両一覧を表示（デバッグ用）", WS_TABSTOP | BS_AUTOCHECKBOX, X + WID - 220, Y + 270, 220, 22, ID_VEH_CHK, 0);
     HWND vl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 292, WID, 220, ID_VEH_LV, 0, WS_EX_CLIENTEDGE);
