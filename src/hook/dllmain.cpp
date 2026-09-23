@@ -301,50 +301,27 @@ static void put_tile_load(std::vector<uint8_t>& v, int32_t tx, int32_t tz) {   /
 }
 static void put_tile_unload(std::vector<uint8_t>& v, int32_t tx, int32_t tz) { put_u32(v, 0x46); put_u32(v, (uint32_t)tx); put_u32(v, (uint32_t)tz); }
 
-// ---- player self-help: `?unstuck` / `?unstuck2` ----
-// For the "ghost chunk" stall: the client stops simulating the world on entering a tile while its
-// network thread keeps running (tools/swcap/README.md). `?` lines go to addons and never reach the
-// chat, so the game ignores these and the DLL — which only watches the client 0x02 — queues, on the
-// same g_nudge path as debug.nudge, for the 5x5 tiles around the player's last pose (the ring a teleport streams): `?unstuck` a 0x45 load,
-// `?unstuck2` a 0x46 unload then the 0x45 kReloadGapMs later (forced reload); plus a 0x01 chat line to
-// that player alone so they see it was taken. Each 0x45 carries the tile's last server-sent u8 (1 if never seen): with 0 the client re-created the
-// tile as unpurchased (workbench unusable) on both variants — the server only ever sends 1, for tiles it
-// keeps as purchased (the ones with a workbench, it seems); a teleport away and back restored it. Always on (players help themselves, no admin needed);
-// per-peer cooldown; every use is logged and marked. Both variants stay until one proves enough.
-constexpr uint64_t kUnstuckCooldownMs = 5000;
-constexpr int kUnstuckRadius = 2;                             // 5x5 = the ring the server itself streams on a teleport
-static std::map<uint64_t, uint64_t> g_unstuckMs;              // sid -> last accepted use
-// 1 = "?unstuck", 2 = "?unstuck2", 0 = anything else (exact match: case and blanks count)
-static int unstuck_cmd(const uint8_t* s, int n) {
-    auto is = [&](const char* c) { return n == (int)strlen(c) && !memcmp(s, c, n); };
-    return is("?unstuck") ? 1 : is("?unstuck2") ? 2 : 0;
-}
 static void put_chat(std::vector<uint8_t>& v, const std::string& text, const std::string& from) {   // SEND 0x01
     put_u32(v, 0x01);
     uint16_t n = (uint16_t)text.size(); v.push_back((uint8_t)n); v.push_back((uint8_t)(n >> 8)); v.insert(v.end(), text.begin(), text.end());
     uint16_t m = (uint16_t)from.size(); v.push_back((uint8_t)m); v.push_back((uint8_t)(m >> 8)); v.insert(v.end(), from.begin(), from.end());
 }
-static void on_unstuck(uint64_t sid, const stats::Peer& ps, int mode, uint64_t now) {
-    uint64_t& last = g_unstuckMs[sid];
-    if (last && now - last < kUnstuckCooldownMs) { logf("== unstuck ignored (cooldown): peer=%llu ==\n", (unsigned long long)sid); return; }
-    if (!ps.posMs) { logf("== unstuck ignored (no pose yet): peer=%llu ==\n", (unsigned long long)sid); return; }
-    last = now;
-    int32_t tx = tile_of(ps.px), tz = tile_of(ps.pz);
-    bool reload = mode == 2;
-    Nudge nd; nd.kind = reload ? "unstuck/0x46" : "unstuck/0x45";
-    for (int32_t x = tx - kUnstuckRadius; x <= tx + kUnstuckRadius; ++x)
-        for (int32_t z = tz - kUnstuckRadius; z <= tz + kUnstuckRadius; ++z) {
-            if (reload) { put_tile_unload(nd.recs, x, z); put_tile_load(nd.follow, x, z); ++nd.followCount; }
-            else put_tile_load(nd.recs, x, z);
-            ++nd.count;
-        }
-    char msg[96]; _snprintf_s(msg, _TRUNCATE, "reloading tiles around (%d, %d)", tx, tz);
-    put_chat(nd.recs, msg, "[SW_MultiSync]"); ++nd.count;
-    g_nudge[sid] = std::move(nd);
-    uint64_t mk = write_marker();
-    logf("== unstuck: peer=%llu name=\"%s\" pos=(%.1f,%.1f,%.1f) tile=(%d,%d) r=%d mode=%d mark=%llu ==\n", (unsigned long long)sid,
-         ps.name.c_str(), ps.px, ps.py, ps.pz, tx, tz, kUnstuckRadius, mode, (unsigned long long)mk);
-    logflush();
+
+// ---- in-game chat commands (`?` lines go to addons and never reach the chat, so only the DLL sees them) ----
+#include "unstuck.h"
+// `?multisync`: tell that player alone the DLL version and whether relay is on — a status check from inside the game.
+static void on_multisync(uint64_t sid) {
+    std::vector<uint8_t> v;
+    char msg[96]; _snprintf_s(msg, _TRUNCATE, "SW_MultiSync v%s  relay: %s", SWHOOK_VERSION, g_relay ? "ON" : "OFF");
+    put_chat(v, msg, "[SW_MultiSync]");
+    auto it = g_nudge.find(sid);                              // don't drop a pending nudge: ride along with it
+    if (it != g_nudge.end()) { it->second.recs.insert(it->second.recs.end(), v.begin(), v.end()); ++it->second.count; }
+    else { Nudge nd; nd.kind = "multisync"; nd.recs = std::move(v); nd.count = 1; g_nudge[sid] = std::move(nd); }
+    logf("== multisync: peer=%llu relay=%d ==\n", (unsigned long long)sid, (int)g_relay);
+}
+static void on_chat_cmd(uint64_t sid, const stats::Peer& ps, const uint8_t* s, int n, uint64_t now) {   // exact match
+    if (n == 10 && !memcmp(s, "?multisync", 10)) on_multisync(sid);
+    else if (int mode = unstuck_cmd(s, n)) on_unstuck(sid, ps, mode, now);
 }
 
 // Ends a hold (called under g_cs) and logs what was dropped.
@@ -529,7 +506,7 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                         else if (body[off] == 0x02) {   // chat line: u16 n · text (L = 6 + n, walk-checked)
                             int tn = (int)rec::U16(body, blen, off + 4);
                             on_chat_line(sid, body + off + 6, tn);
-                            if (int mode = unstuck_cmd(body + off + 6, tn)) on_unstuck(sid, ps, mode, now);
+                            on_chat_cmd(sid, ps, body + off + 6, tn, now);
                         }
                         else if (body[off] == 0x34) {   // heartbeat: u32 clientTick · u32 0 · u32 clientTps · u32 framesBehind
                             ps.cliTick = rec::U32(body, blen, off + 4); ps.cliTps = rec::U32(body, blen, off + 12);
