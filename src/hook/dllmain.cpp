@@ -404,6 +404,17 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
             const uint8_t* b = static_cast<const uint8_t*>(m->m_pData); uint32_t cub = (uint32_t)m->m_cbSize;
             if (m->m_nChannel == 0 && cub >= 22 && *reinterpret_cast<const uint32_t*>(b) == 0) {
                 const uint8_t* body = b + 8; int blen = (int)cub - 8;
+                // Join request (msgType=1, protocol/transport.md): u16 n · name[n] first. Sent on every join
+                // attempt (again after a password prompt), so a rejoin under a new name overwrites.
+                if (rec::U32(body, blen, 0) == 1 && rec::U32(body, blen, 4) == 1) {
+                    int n = body[8] | (body[9] << 8);
+                    if (n > 0 && n <= 64 && 10 + n <= blen) {
+                        std::string nm;
+                        for (int k = 0; k < n; k++) if (body[10 + k] >= 0x20 && body[10 + k] != 0x7F) nm += (char)body[10 + k];
+                        if (nm != ps.name) logf("join: peer %llu name \"%s\"\n", (unsigned long long)sid, nm.c_str());
+                        ps.name = nm;
+                    }
+                }
                 if (rec::U32(body, blen, 0) == 1 && rec::U32(body, blen, 4) == 3) {
                     ps.type3++;
                     rec::Walk w = rec::walk_client(body, blen);
@@ -516,7 +527,7 @@ static void write_peers(json::JsonW& w) {
         const stats::Peer& p = kv.second;
         int vehs = 0; for (auto& g : relay::g_natGap) if (g.first.first == kv.first) vehs++;
         bool connected = p.connected && now - p.lastSeenMs <= stats::kSilentMs;
-        w.obj().kv("steamId", kv.first).kvb("connected", connected)
+        w.obj().kv("steamId", kv.first).kv("name", p.name).kvb("connected", connected)
          .kv("firstSeenMs", p.firstSeenMs).kv("lastSeenMs", p.lastSeenMs).kv("lastTick", p.lastTick)
          .kv("sendCount", p.sendCount).kv("sendBytes", p.sendBytes)
          .kv("recvCount", p.recvCount).kv("recvBytes", p.recvBytes)

@@ -5,6 +5,7 @@
 #pragma once
 #include <cstdint>
 #include <map>
+#include <string>
 
 namespace stats {
 
@@ -22,6 +23,7 @@ struct Peer {
     uint64_t type3 = 0, rwalkFull = 0, rwalkPartial = 0;
     double   px = 0, py = 0, pz = 0;   // from client 0x2F (~every 5 ticks while moving)
     uint64_t posMs = 0;                // GetTickCount64 of the last 0x2F; 0 = never
+    std::string name;                  // in-game player name from the client's join request (RECV msgType=1); "" = not seen
     uint32_t lastTick = 0;             // highest world tick seen in a type=8 to this peer
     uint64_t tickRewinds = 0;          // type=8 whose tick was below lastTick (server resend/rewind; never seen so far)
 };

@@ -97,8 +97,8 @@ static std::map<std::string, PeerSample> g_prev; static double g_prevMs = 0;
 static void print_peers(const std::string& r, bool rates) {
     const char* o = r.c_str();
     double now = N(o, "nowMs"); double dt = (g_prevMs && now > g_prevMs) ? (now - g_prevMs) / 1000.0 : 0;
-    printf("%-18s %-5s %9s %9s %9s %7s %7s %5s %6s %6s %-26s %-8s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
-           rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "rwalk%", "vehs", "type8", "rewind", "pos (x y z)", "last", "freeze");
+    printf("%-18s %-5s %9s %9s %9s %7s %7s %5s %6s %6s %-26s %-8s %-20s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
+           rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "rwalk%", "vehs", "type8", "rewind", "pos (x y z)", "last", "freeze", "name");
     json::for_each_elem(json::find_value(o, "peers"), [&](const char* p) {
         std::string id = ID(p, "steamId");
         bool conn = false; json::get_bool(p, "connected", conn);
@@ -117,9 +117,10 @@ static void print_peers(const std::string& r, bool rates) {
             if (since > 0) snprintf(frz, sizeof frz, "FROZEN %s %.0fs", S(fz, "reason").c_str(), (now - since) / 1000);
             else if (ev > 0) snprintf(frz, sizeof frz, "ok (%.0f past)", ev);
         }
-        printf("%-18s %-5s %9s %9s %9s %6.1f%% %6.1f%% %5.0f %6.0f %6.0f %-26s %-8s %s\n", id.c_str(), conn ? "yes" : "no",
+        printf("%-18s %-5s %9s %9s %9s %6.1f%% %6.1f%% %5.0f %6.0f %6.0f %-26s %-8s %-20s %s\n", id.c_str(), conn ? "yes" : "no",
                fmt_bytes(vs).c_str(), fmt_bytes(vi).c_str(), fmt_bytes(vr).c_str(),
-               t8 ? 100.0 * wf / t8 : 0, t3 ? 100.0 * rwf / t3 : 0, N(p, "vehicles"), t8, N(p, "tickRewinds"), posS, ago, frz);
+               t8 ? 100.0 * wf / t8 : 0, t3 ? 100.0 * rwf / t3 : 0, N(p, "vehicles"), t8, N(p, "tickRewinds"), posS, ago, frz,
+               S(p, "name").empty() ? "-" : S(p, "name").c_str());
     });
     g_prevMs = now;
 }
@@ -181,6 +182,7 @@ static int cmd_inject(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    SetConsoleOutputCP(CP_UTF8);   // player names (peers[].name) are UTF-8
     relay::load_config_file((injector::exe_dir() + "swhook.ini").c_str());   // absent/unreadable: keep 28215
     g_port = relay::g_cfg.ipcPort;
     int i = 1;

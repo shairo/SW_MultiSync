@@ -11,7 +11,7 @@ record level. Decoded live 2026-09-12 on v1.15.23 and verified across the captur
                       simple head/continuation flag (see "Bulk" below). Do not assume 0/1.
 +4  u32  bodyLen      = cubData - 8 for single-frame messages (holds for every gameplay pkt)
 +8  u32  =1           protocol constant
-+12 u32  msgType      6=version, 7=?, 8=game-update, 9=tile transfer, 16=file-transfer, ...
++12 u32  msgType      1=join request (client), 6=version/password prompt, 7=join accepted, 8=game-update, 9=tile transfer, 16=file-transfer, ...
 +16 u32  tick         monotonic frame/sequence counter (world tick)
 +20 u32  subType      always 0x10 for msgType 8
 +24 u32  recordCount  number of records that follow
@@ -24,6 +24,20 @@ The first 8 bytes are the transport prefix; everything from `+8` on is the **mes
 from the table above.
 
 Most ticks send `recordCount=0` (empty heartbeat, 28 B on the wire).
+
+## Join handshake (`session_20260923_135519_159`, one password-protected join)
+
+```
+client → server  ch0 msgType=1  join request: u16 n · name[n] (in-game player name, UTF-8)
+                                · u16 n · version ("v1.15.23") · u16 n · password (empty on the first try)
+                                · u16 n · hex string (~516 chars, Steam auth ticket)
+server → client  ch0 msgType=6  u16 n · version — sent when the password was missing/wrong; the client
+                                prompts and resends msgType=1 with the password (10 s later here)
+server → client  ch0 msgType=7  accepted (world/session info); client answers msgType=15, then 2 …
+```
+The name only ever appears in msgType=1 (and later inside the player's own 0x4D character state, which
+carries no SteamID), so the DLL keeps it per peer from msgType=1 (`peers[].name`, ipc-protocol.md).
+Never log or expose the password field.
 
 ## Channels
 

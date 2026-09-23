@@ -52,9 +52,11 @@ captureBytes logFile walkFailFile ipcPort ipcClients ipcRequests peerCount vehic
 (`full/type8` = walk rate). `inject{sends appended rewritten bytes}` — relay totals.
 
 ### peers[] entry
-`steamId connected firstSeenMs lastSeenMs lastTick sendCount sendBytes recvCount recvBytes
+`steamId name connected firstSeenMs lastSeenMs lastTick sendCount sendBytes recvCount recvBytes
 injSends injBytes injRecords type8 walkFull walkPartial tickRewinds vehicles
 type3 rwalkFull rwalkPartial [pos[3] posMs]`
+`name` is the in-game player name (UTF-8) from the client's join request (RECV msgType=1, see
+`protocol/transport.md`); `""` for players who joined before the DLL was injected.
 `type3`/`rwalkFull`/`rwalkPartial` are the client→server (msgType=3) counterparts of the walk KPI;
 `pos` is the player's last world position from client 0x2F (absent until one is seen), `posMs` its
 GetTickCount64 stamp (compare with `nowMs`).

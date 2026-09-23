@@ -53,6 +53,10 @@ static double g_rateSend = 0, g_rateInj = 0;   // totals across peers, bytes/s
 // The DLL reports connected=false after 5 s of silence and evicts peers after 10 min (stats.h);
 // the GUI additionally hides rows silent for over 2 minutes to keep the table short.
 static const double kPeerDropSec = 120;
+// SteamID -> in-game name (peers[].name, known only for players who joined after injection); rebuilt
+// on every peers.get and used wherever a SteamID is shown.
+static std::map<uint64_t, std::wstring> g_names;
+static std::wstring name_of(uint64_t id) { auto it = g_names.find(id); return it == g_names.end() ? L"-" : it->second; }
 
 // ---------------------------------------------------------------- controls
 enum {
@@ -295,7 +299,7 @@ static void render_debug() {
         double ago = (now - N(p, "lastSeenMs")) / 1000;
         if (ago > kPeerDropSec) return;
         double pos[3] = {0,0,0}; bool hasPos = json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3;
-        rows.push_back({ W(std::to_string(id)), hasPos ? fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-", freeze_text(p, now, true) });
+        rows.push_back({ W(std::to_string(id)), name_of(id), hasPos ? fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-", freeze_text(p, now, true) });
     });
     lv_fill(H(ID_DBG_LV), rows);
     bool sel = ListView_GetNextItem(H(ID_DBG_LV), -1, LVNI_SELECTED) >= 0;
@@ -323,9 +327,11 @@ static void render_peers() {
     double now = N(o, "nowMs"); double dt = (g_prevMs && now > g_prevMs) ? (now - g_prevMs) / 1000.0 : 0;
     std::vector<std::vector<std::wstring>> rows;
     double totS = 0, totI = 0;
+    g_names.clear();
     json::for_each_elem(json::find_value(o, "peers"), [&](const char* p) {
         uint64_t id = 0; json::get_u64(p, "steamId", id);
-        std::string ids = std::to_string(id);
+        std::string ids = std::to_string(id), nm = Sx(p, "name");
+        if (!nm.empty()) g_names[id] = W(nm);
         double sb = N(p, "sendBytes"), ib = N(p, "injBytes"), rb = N(p, "recvBytes"), t8 = N(p, "type8"), wf = N(p, "walkFull");
         Prev& pv = g_prevPeer[ids];
         double vs = dt ? (sb - pv.sendBytes) / dt : 0, vi = dt ? (ib - pv.injBytes) / dt : 0, vr = dt ? (rb - pv.recvBytes) / dt : 0;
@@ -335,7 +341,7 @@ static void render_peers() {
         bool conn = B(p, "connected");
         double t3 = N(p, "type3"), rwf = N(p, "rwalkFull"), pos[3] = {0,0,0};
         bool hasPos = json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3;
-        rows.push_back({ W(ids), conn ? L"接続中" : L"切断", bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
+        rows.push_back({ name_of(id), W(ids), conn ? L"接続中" : L"切断", bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
                          fmtw(L"%.1f%%", t8 ? 100.0 * wf / t8 : 0), fmtw(L"%.1f%%", t3 ? 100.0 * rwf / t3 : 0),
                          hasPos ? fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-",
                          fmtw(L"%.0f", N(p, "vehicles")), fmtw(L"%.0f", N(p, "tickRewinds")), fmtw(L"%.0f 秒前", ago), freeze_text(p, now) });
@@ -360,13 +366,14 @@ static void render_vehicles() {
             uint64_t id = 0; json::get_u64(f, "steamId", id); double g = N(f, "gap");
             if (g < minGap) minGap = g; nf++;
             if (!feeds.empty()) feeds += L", ";
-            feeds += fmtw(L"%llu:%.0f", (unsigned long long)id, g);
+            auto it = g_names.find(id);
+            feeds += it != g_names.end() ? it->second + fmtw(L":%.0f", g) : fmtw(L"%llu:%.0f", (unsigned long long)id, g);
         });
         rows.push_back({ fmtw(L"%.0f", N(v, "id")), hasGrp ? fmtw(L"%.0f", grp) : L"不明", fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]),
                          sg > 0 ? fmtw(L"%.0f", sg) : L"-", fmtw(L"%d", nf), feeds });
     });
     lv_fill(H(ID_VEH_LV), rows);
-    set(ID_VEH_LBL, fmtw(L"車両 (%d)  — グループ: 注入前スポーンは不明 / I_src: 最密な更新間隔tick / 受信者: SteamID:間隔tick", (int)rows.size()));
+    set(ID_VEH_LBL, fmtw(L"車両 (%d)  — グループ: 注入前スポーンは不明 / I_src: 最密な更新間隔tick / 受信者: 名前(不明ならSteamID):間隔tick", (int)rows.size()));
 }
 
 static void render_log() {
@@ -454,11 +461,11 @@ static void build_ui() {
     mk(L"STATIC", L"", 0, X + 316, Y + 22, WID - 316, 18, ID_WALK_TXT, 0);
     mk(L"STATIC", L"参加プレイヤー", 0, X, Y + 66, 400, 18, ID_PEERS_LBL, 0);
     HWND pl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 86, WID, 176, ID_PEERS_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(pl, { {L"SteamID", 130}, {L"状態", 50}, {L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40}, {L"tick巻戻", 55}, {L"最終通信", 60}, {L"凍結検知", 110} });
+    lv_cols(pl, { {L"名前", 110}, {L"SteamID", 125}, {L"状態", 50}, {L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40}, {L"tick巻戻", 55}, {L"最終通信", 60}, {L"凍結検知", 110} });
     mk(L"STATIC", L"車両", 0, X, Y + 272, 640, 18, ID_VEH_LBL, 0);
     mk(L"BUTTON", L"車両一覧を表示（デバッグ用）", WS_TABSTOP | BS_AUTOCHECKBOX, X + WID - 220, Y + 270, 220, 22, ID_VEH_CHK, 0);
     HWND vl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 292, WID, 220, ID_VEH_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(vl, { {L"ID", 50}, {L"グループ", 60}, {L"位置 (x, y, z)", 210}, {L"I_src", 50}, {L"受信者数", 60}, {L"受信者 (SteamID:間隔)", 400} });
+    lv_cols(vl, { {L"ID", 50}, {L"グループ", 60}, {L"位置 (x, y, z)", 210}, {L"I_src", 50}, {L"受信者数", 60}, {L"受信者 (名前:間隔)", 400} });
 
     // --- settings tab
     mk(L"STATIC", L"項目をクリックして値を編集し「適用」。適用した値は稼働中すぐ効きます。「iniに保存」で次回以降にも引き継がれます。",
@@ -487,7 +494,7 @@ static void build_ui() {
        0, X, Y, WID, 18, ID_DBG_NOTE, kDebugTab);
     mk(L"STATIC", L"プレイヤー", 0, X, Y + 26, WID, 18, ID_DBG_LBL, kDebugTab);
     HWND dl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER, X, Y + 46, WID, 200, ID_DBG_LV, kDebugTab, WS_EX_CLIENTEDGE);
-    lv_cols(dl, { {L"SteamID", 140}, {L"位置 (x, y, z)", 150}, {L"凍結検知（pose静止 / 車両定義の未ack）", 560} });
+    lv_cols(dl, { {L"SteamID", 140}, {L"名前", 110}, {L"位置 (x, y, z)", 150}, {L"凍結検知（pose静止 / 車両定義の未ack）", 450} });
     mk(L"STATIC", L"通信遮断 (debug.hold)：このプレイヤー宛の送信を指定 ms 間すべて棄却（再送しない）。同期の穴に対する挙動の実験用。", 0, X, Y + 258, WID, 18, ID_DBG_HOLD_LBL, kDebugTab);
     mk(L"EDIT", L"5000", WS_TABSTOP | ES_NUMBER, X, Y + 280, 80, 24, ID_DBG_HOLD_MS, kDebugTab, WS_EX_CLIENTEDGE);
     mk(L"BUTTON", L"遮断開始 (ms)", WS_TABSTOP | BS_PUSHBUTTON, X + 88, Y + 279, 130, 26, ID_DBG_HOLD, kDebugTab);
