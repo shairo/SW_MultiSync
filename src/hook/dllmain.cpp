@@ -293,6 +293,9 @@ static std::map<uint64_t, Nudge> g_nudge;                     // under g_cs; con
 static void put_u32(std::vector<uint8_t>& v, uint32_t x) { v.insert(v.end(), reinterpret_cast<uint8_t*>(&x), reinterpret_cast<uint8_t*>(&x) + 4); }
 constexpr uint64_t kReloadGapMs = 500;                        // 0x46 → 0x45 spacing for the reload probe (a few ticks apart)
 static int32_t tile_of(double c) { return (int32_t)floor((c + 500.0) / 1000.0); }   // 1 km grid, see protocol/reference.md
+// Trailing u8 (= purchased) of the last 0x45 the server itself sent for each tile. The tile stream is
+// broadcast identically to every peer, so one map serves all; ?unstuck re-sends it (1 if never seen).
+static std::map<std::pair<int32_t, int32_t>, uint8_t> g_tileFlag;
 
 // ---- player self-help: `?unstuck` / `?unstuck2` ----
 // For the "ghost chunk" stall: the client stops simulating the world on entering a tile while its
@@ -325,15 +328,17 @@ static void on_unstuck(uint64_t sid, const stats::Peer& ps, int mode, uint64_t n
     bool reload = mode == 2;
     Nudge nd; nd.kind = reload ? "unstuck/0x46" : "unstuck/0x45";
     put_u32(nd.recs, reload ? 0x46 : 0x45); put_u32(nd.recs, (uint32_t)tx); put_u32(nd.recs, (uint32_t)tz);
-    if (!reload) nd.recs.push_back(1);
-    nd.loadFlag = 1;
+    auto tf = g_tileFlag.find({ tx, tz });
+    uint8_t flag = tf != g_tileFlag.end() ? tf->second : 1;
+    if (!reload) nd.recs.push_back(flag);
+    nd.loadFlag = flag;
     char msg[96]; _snprintf_s(msg, _TRUNCATE, "reloading tile (%d, %d)", tx, tz);
     put_chat(nd.recs, msg, "[SW_MultiSync]");
     nd.count = 2; nd.reload = reload; nd.tx = tx; nd.tz = tz;
     g_nudge[sid] = std::move(nd);
     uint64_t mk = write_marker();
-    logf("== unstuck: peer=%llu name=\"%s\" pos=(%.1f,%.1f,%.1f) tile=(%d,%d) mode=%d mark=%llu ==\n", (unsigned long long)sid,
-         ps.name.c_str(), ps.px, ps.py, ps.pz, tx, tz, mode, (unsigned long long)mk);
+    logf("== unstuck: peer=%llu name=\"%s\" pos=(%.1f,%.1f,%.1f) tile=(%d,%d) flag=%u%s mode=%d mark=%llu ==\n", (unsigned long long)sid,
+         ps.name.c_str(), ps.px, ps.py, ps.pz, tx, tz, (unsigned)flag, tf != g_tileFlag.end() ? "" : " (default)", mode, (unsigned long long)mk);
     logflush();
 }
 
@@ -409,6 +414,8 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
             for (int i = 0, off = 20, cnt = (int)rec::U32(body, blen, 16); i < cnt && off < blen; i++) {   // 0x2C = vehicle gone for this peer
                 int L = rec::decode_len(body, blen, off); if (L <= 0) break;
                 if (rec::U32(body, blen, off) == 0x2C) freeze::on_remove(sid, rec::U32(body, blen, off + 4));
+                else if (rec::U32(body, blen, off) == 0x45)   // tile load: i32 x · i32 z · u8 purchased
+                    g_tileFlag[{ (int32_t)rec::U32(body, blen, off + 4), (int32_t)rec::U32(body, blen, off + 8) }] = body[off + 12];
                 else if (rec::U32(body, blen, off) == 0x01 && !g_chatPending.empty()) {   // chat: u16 n · text · u16 m · sender
                     int tn = (int)rec::U16(body, blen, off + 4), nn = (int)rec::U16(body, blen, off + 6 + tn);
                     if (nn > 0 && nn <= 64)
