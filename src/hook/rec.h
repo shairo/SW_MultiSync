@@ -161,7 +161,9 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x06: L = 14 + (int)U32(b, len, off + 10); break;
         default: return -1;
     }
-    if (L <= 0 || off + L > len) return -1;
+    // `off + L` would overflow int for an attacker-chosen length near INT_MAX and slip past the
+    // check; `L > len - off` cannot overflow (callers guarantee 0 <= off < len). See rec.h header.
+    if (L <= 0 || off >= len || L > len - off) return -1;
     return L;
 }
 
@@ -240,7 +242,8 @@ inline int decode_client_len(const uint8_t* b, int len, int off) {
         case 0x52: L = 23 + (int)U16(b, len, off + 12); break;        // item action request
         default: return -1;
     }
-    if (L <= 0 || off + L > len) return -1;
+    // See decode_len: avoid the `off + L` int overflow that a hostile client length could exploit.
+    if (L <= 0 || off >= len || L > len - off) return -1;
     return L;
 }
 
