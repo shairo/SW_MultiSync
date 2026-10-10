@@ -22,6 +22,7 @@
 #include "relay.h"
 #include "stats.h"
 #include "freeze.h"
+#include "tiles.h"
 #include "ipc.h"
 
 // Base directory = the folder swhook.dll lives in (resolved at load from the DLL's own path), so the
@@ -377,7 +378,7 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
     ps.sendCount++; ps.sendBytes += cub;
     // ch15 1-byte control: 0x01 session open, 0x02 close. Close marks the peer disconnected; any later
     // traffic re-marks it (stats::touch), so a rejoin shows up naturally.
-    if (ch == 15 && cub == 1 && b[0] == 0x02) ps.connected = false;
+    if (ch == 15 && cub == 1 && b[0] == 0x02) { ps.connected = false; tiles::reset(sid, GetTickCount64()); }
     // ch1 type=12 = a vehicle definition pushed to this peer (answer to its 0x1B request); the
     // freeze detector waits for the matching 0x29 "loaded" ack from the client.
     if (ch == 1 && head && blen >= 12 && *reinterpret_cast<const uint32_t*>(body + 4) == 12)
@@ -390,14 +391,19 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
         if (tick > g_worldTick) g_worldTick = tick;
         rec::Walk w = selftest(body, blen);
         full = w.full;
-        if (full) ps.walkFull++; else { ps.walkPartial++; dump_walkfail(0, n, sid, ch, flags, w, data, cub); }
+        if (full) ps.walkFull++; else { ps.walkPartial++; tiles::on_gap(sid, GetTickCount64()); dump_walkfail(0, n, sid, ch, flags, w, data, cub); }
         if (full) {
             relay::observe(sid, body, blen, tick);                   // passive: keep caches warm
             for (int i = 0, off = 20, cnt = (int)rec::U32(body, blen, 16); i < cnt && off < blen; i++) {   // 0x2C = vehicle gone for this peer
                 int L = rec::decode_len(body, blen, off); if (L <= 0) break;
                 if (rec::U32(body, blen, off) == 0x2C) freeze::on_remove(sid, rec::U32(body, blen, off + 4));
-                else if (rec::U32(body, blen, off) == 0x45)   // tile load: i32 x · i32 z · u8 purchased
-                    g_tileFlag[{ (int32_t)rec::U32(body, blen, off + 4), (int32_t)rec::U32(body, blen, off + 8) }] = body[off + 12];
+                else if (rec::U32(body, blen, off) == 0x45) {   // tile load: i32 x · i32 z · u8 purchased
+                    int32_t x = (int32_t)rec::U32(body, blen, off + 4), z = (int32_t)rec::U32(body, blen, off + 8);
+                    g_tileFlag[{ x, z }] = body[off + 12];
+                    tiles::on_load(sid, x, z, body[off + 12], tick, GetTickCount64());
+                }
+                else if (rec::U32(body, blen, off) == 0x46)     // tile unload: i32 x · i32 z
+                    tiles::on_unload(sid, (int32_t)rec::U32(body, blen, off + 4), (int32_t)rec::U32(body, blen, off + 8), tick, GetTickCount64());
                 else if (rec::U32(body, blen, off) == 0x01 && !g_chatPending.empty()) {   // chat: u16 n · text · u16 m · sender
                     int tn = (int)rec::U16(body, blen, off + 4), nn = (int)rec::U16(body, blen, off + 6 + tn);
                     if (nn > 0 && nn <= 64)
@@ -487,6 +493,7 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                 if (rec::U32(body, blen, 0) == 1 && rec::U32(body, blen, 4) == 1) {
                     int n = body[8] | (body[9] << 8);
                     if (n > 0 && n <= 64 && 10 + n <= blen) learn_name(sid, ps, clean_name(body + 10, n), "join");
+                    tiles::reset(sid, now);                  // new client session: its tile set starts empty
                 }
                 if (rec::U32(body, blen, 0) == 1 && rec::U32(body, blen, 4) == 3) {
                     ps.type3++;
@@ -503,6 +510,8 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                         int L = rec::decode_client_len(body, blen, off); if (L <= 0) break;
                         if (body[off] == 0x1B) freeze::on_defreq(sid, rec::U32(body, blen, off + 4), now);
                         else if (body[off] == 0x29) freeze::on_defack(sid, rec::U32(body, blen, off + 4), now);
+                        else if (body[off] == 0x28)     // tile ack: i32 x · i32 z
+                            tiles::on_ack(sid, (int32_t)rec::U32(body, blen, off + 4), (int32_t)rec::U32(body, blen, off + 8), now);
                         else if (body[off] == 0x02) {   // chat line: u16 n · text (L = 6 + n, walk-checked)
                             int tn = (int)rec::U16(body, blen, off + 4);
                             on_chat_line(sid, body + off + 6, tn);
@@ -801,6 +810,7 @@ static std::string ipc_handle(const std::string& line) {
                     if (kind == "tile") put_tile_load(nd.recs, tx, tz);
                     else                put_tile_unload(nd.recs, tx, tz);
                     if (kind == "reload") { put_tile_load(nd.follow, tx, tz); nd.followCount = 1; }
+                    if (kind != "unload") tiles::on_inject(sid, tx, tz, GetTickCount64());
                     nd.count = 1;
                 }
             } else if (kind == "raw") {

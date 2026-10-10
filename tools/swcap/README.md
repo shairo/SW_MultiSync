@@ -89,6 +89,10 @@ dotnet run -c Release -- vehscan "$CAP" --id <veh> --peer <搭乗者steamid>
   回復操作の第一候補: `swctl nudge <peer> reload`（0x46→0.5 s 後 0x45）。
   **プレイヤー自身の脱出手段**: チャット `?unstuck`（周囲 5×5 タイルへ 0x45）/ `?unstuck2`（0x46→0.5 s 後 0x45）。実験機能・src/hook/unstuck.h に隔離、効く方だけ残す予定。
   DLL がクライアント 0x02 を見て同じ nudge 経路で送り、本人にだけ 0x01 で受付を返す。ログ `== unstuck:` + マーカー。
+  **再送前の診断**（src/hook/tiles.h）: ピアごとにサーバーが送った 0x45/0x46 と クライアント 0x28 ack を記録し、
+  `?unstuck` 時に 5×5 各タイルを LOAD+ack / LOAD/no-ack / UNLOAD / UNSEEN で分類してログ（`== unstuck tiles:` /
+  `== unstuck verdict:`）と本人チャット（件数＋判定の 1 行）に出す。UNSEEN が 1 つでもあれば INSUFFICIENT（DLL 注入・再注入前に送られた）。
+  台帳は join 要求と ch15 close でリセット。オフライン再生: `test_tiles <file.swcap>`。
 
 ### フリーズ調査の追加レシピ
 ```bash
