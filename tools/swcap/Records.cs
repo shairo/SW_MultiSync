@@ -155,6 +155,20 @@ public static class Records
             case 0x67: // CHARACTER VITALS broadcast: tag + u32 charId + u8 1 + f32 hp + u32 (36000) + f32 100 + f32 (5/15). Mirror of client 0x39. VERIFIED (session_20260917_002237)
                 r.Length = 25; r.Status = off + 25 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"char={U32(b, off + 4)} hp={BinaryPrimitives.ReadSingleLittleEndian(b.AsSpan(off + 9)):F1}"; break;
+            // 0x68/0x69/0x6A/0x84: an object family (ids 15, 808..832) seen during addon missile combat,
+            // session_20261108_045606_169. All fixed-length; lengths pinned as last record (lens/solve).
+            case 0x68: // OBJECT CREATE? tag + u32 id + u32 0 + f64 x,y,z + f32[4] = 52
+                r.Length = 52; r.Status = off + 52 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                if (r.Status == RecStatus.Ok) r.Note = $"id={U32(b, off + 4)} pos=({F64(b, off + 12):F0},{F64(b, off + 20):F0},{F64(b, off + 28):F0})"; break;
+            case 0x69: // OBJECT REMOVE? tag + u32 id = 8
+                r.Length = 8; r.Status = off + 8 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                if (r.Status == RecStatus.Ok) r.Note = $"id={U32(b, off + 4)}"; break;
+            case 0x6A: // OBJECT ?: tag + u32 id + f32[3] (0) + f32[3] unit dir + 6 B (u16 0, u16 180, u16 2000) = 38
+                r.Length = 38; r.Status = off + 38 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                if (r.Status == RecStatus.Ok) r.Note = $"id={U32(b, off + 4)} dir=({F32(b, off + 20):F2},{F32(b, off + 24):F2},{F32(b, off + 28):F2})"; break;
+            case 0x84: // OBJECT POSE: tag + u32 id + u32 world tick + f64 x,y,z + f32 quat = 52
+                r.Length = 52; r.Status = off + 52 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                if (r.Status == RecStatus.Ok) r.Note = $"id={U32(b, off + 4)} tick={U32(b, off + 8)} pos=({F64(b, off + 12):F0},{F64(b, off + 20):F0},{F64(b, off + 28):F0})"; break;
             case 0x88: // GAME SETTINGS bool array broadcast: tag + 33 x u8. Mirror of client 0x48 (sent on every settings-menu toggle). VERIFIED (session_20260917_005633)
                 r.Length = 37; r.Status = off + 37 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = "bools=" + string.Concat(Enumerable.Range(0, 33).Select(i => off + 4 + i < b.Length ? (char)('0' + b[off + 4 + i]) : '?')); break;

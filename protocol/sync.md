@@ -136,3 +136,19 @@ Seen len **76** (payload 64, the common single form, 3333× across captures) and
 124-B header + **3 × 64-B entries**, each a body: `float[3] pos` + HP `float ≈ 100`). One entry per body;
 NPCs & objects both use it. The old fixed-76 guess mis-split the 328 form's zero tail into a phantom
 **tag 0x00** (not a real record — resolved by the variable rule).
+
+## 0x68 / 0x69 / 0x6A / 0x84 — object family (projectile-like?)  ✅ lengths fixed, meaning △
+Decoded 2026-11-08 from `session_20261108_045606_169` (1 peer, addon missile combat; these four were 25–33 % of
+walk failures). Lengths pinned with `swcap lens` (last-record cases) and `swcap solve`; all fixed. The same rules
+also lift the 2026-09 `--legacy` captures from 76–93 % to 99.8–100 % walked, so they are not new in the update.
+```
+0x84 (52): u32 tag · u32 id · u32 world tick (= message tick) · f64 x,y,z · f32 quat[4] (|q| = 1)
+0x68 (52): u32 tag · u32 id · u32 0 · f64 x,y,z · f32[4] (last = 1.0; not a unit quat)
+0x6A (38): u32 tag · u32 id · f32[3] (0 in all samples) · f32[3] unit vector · u16 0 · u16 180 · u16 2000
+0x69  (8): u32 tag · u32 id
+```
+- id 808: 0x84 and 0x6A alternate every ~11 ticks; id 832: 0x84 only, every ~650 ticks — looks like a distance
+  LOD like 0x81's (note 0x84 carries the send tick, not an ETA).
+- 0x69 id 815 is followed one tick later by 0x68 id 15. Meaning candidates: 0x68 create, 0x69 remove,
+  0x84 pose sync, 0x6A heading/state. Unconfirmed; needs a marked capture (fire / despawn).
+- Still unknown on the legacy captures (< 0.2 % of messages): 0x6B, 0x6C, 0x82, 0x56 — likely the same family.
