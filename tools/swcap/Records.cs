@@ -51,7 +51,7 @@ public static class Records
                 r.Note = $"despawn veh={U32(b, off + 4)}"; break;
 
             case 0x2A: // CHARACTER HP SET: tag + u32 charId + f32 hp (100.0) + u8 + u8 (14 B). The old "tooltip, 24+len" reading
-                       // was 0x2A(13) + a 0x95 map-object record (10+n) — that is why recordCount counted it as 2.
+                       // was 0x2A(13) + a 0x96 map-object record (10+n) — that is why recordCount counted it as 2.
                        // Seen after 0x65 heals in combat (session_20260913_005757_200) and before 0x95 in the addon captures.
                 r.Length = 14; r.Status = off + 14 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"char={U32(b, off + 4)} hp={F32(b, off + 8):F1} u8=({b[off + 12]},{b[off + 13]})"; break;
@@ -217,14 +217,14 @@ public static class Records
             case 0x9E: // (old 0x9D) tag + u32 id + u32 1 + double[3] pos + 7 x u32/f32 (0,1,0,0,0,0,1) + u8 1 + u16 0xFFFF (67 B), then
                        // since the 2026-11 update + u32 vehId + u32 (183..8448) + u32 (0) + f32 + f32 = 87 B. session_20261107_212851_893
                 r.Length = Legacy ? 67 : 87; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
-                r.Note = $"id={U32(b, off + 4)} pos=({F64(b, off + 12):F0},{F64(b, off + 20):F0},{F64(b, off + 28):F0}) veh={U32(b, off + 67)} u={U32(b, off + 71)} f=({F32(b, off + 79):G4},{F32(b, off + 83):G4})"; break;
+                r.Note = $"id={U32(b, off + 4)} pos=({F64(b, off + 12):F0},{F64(b, off + 20):F0},{F64(b, off + 28):F0}) " + (Legacy ? "" : $" veh={U32(b, off + 67)} u={U32(b, off + 71)} f=({F32(b, off + 79):G4},{F32(b, off + 83):G4})"); break;
             case 0x7B: // NOTIFICATION (addon server.notify): tag + u16 n1 + title + u16 n2 + subtitle + u32 type = 12 + n1 + n2. VARIABLE.
             {
                 int n1 = (int)U16(b, off + 4); int n2 = (int)U16(b, off + 6 + n1);
                 r.Length = 12 + n1 + n2; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"title={Str(b, off + 6, n1)} type={U32(b, off + 8 + n1 + n2)}"; break;
             }
-            case 0x4C: // tag + u32 id (8 B) — emitted as a 0x4C/0x8F/0x3D/0x3B quartet per id (map-object family, see 0x3B).
+            case 0x4C: // tag + u32 id (8 B) — emitted as a 0x4C/0x90/0x3D/0x3B quartet per id (map-object family, see 0x3B).
             case 0x90:
             case 0x3D:
                 r.Length = 8; r.Status = off + 8 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
@@ -263,13 +263,13 @@ public static class Records
             case 0xB9: // tag + u32 vehId + u32 + i32 + u32 + i32 -1 + u32 vehId + u32 + u32 1 + u32 1 + 12 B (52 B), runs.
                 r.Length = 52; r.Status = off + 52 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)} u32={U32(b, off + 8)}"; break;
-            case 0xBA: // same header as 0xB8 + 8 B (48 B), runs.
+            case 0xBA: // same header as 0xB9 + 8 B (48 B), runs.
                 r.Length = 48; r.Status = off + 48 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)} u32={U32(b, off + 8)}"; break;
             case 0xBB: // 2x(veh,idx,i32[3]) + u8 (45 B). walkfail_20260919_125459
                 r.Length = 45; r.Status = off + 45 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)} u32={U32(b, off + 8)}"; break;
-            case 0xC0: // 4x(veh,idx,i32[3]) + u32 RGBA (88 B), pairs with 0xC0 on the same voxels. walkfail_20260919_125459
+            case 0xC0: // 4x(veh,idx,i32[3]) + u32 RGBA (88 B), pairs with 0xC1 on the same voxels. walkfail_20260919_125459
                 r.Length = 88; r.Status = off + 88 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)} rgba={U32(b, off + 84):X8}"; break;
             case 0xC1: // 4x(veh,idx,i32[3],f32) (100 B). walkfail_20260919_125459
@@ -294,7 +294,7 @@ public static class Records
                        r.Note = $"remove veh={U32(b, off + 4)}"; break;
 
             // --- vehicle spawn cluster (session_20260914_232332_784, solved ×6; VERIFY on more data) ---
-            case 0x97: r.Length = 13; r.Status = off + 13 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; // spawn create: tag + u32 id + 5B. Emitted as a PAIR (two 13-B 0x96: id then 0) = one create, two records.
+            case 0x97: r.Length = 13; r.Status = off + 13 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; // spawn create: tag + u32 id + 5B. Emitted as a PAIR (two 13-B 0x97: id then 0) = one create, two records.
                        r.Note = $"veh={U32(b, off + 4)}"; break;
             case 0x37: // spawn placement: tag + u32 vehId + double[3] pos + 12B + f32 + u8 u8 + u16 nA + name + u16 nB + strB (e.g. "tan524tan524") = 54 + nA + nB (54 when both empty). walkfail_20260919_125459
             {

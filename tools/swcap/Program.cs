@@ -545,7 +545,7 @@ static void AtTick(string path, string[] a)
         {
             if (r.Status != RecStatus.Ok) continue;
             tagCount[r.Tag] = tagCount.GetValueOrDefault(r.Tag) + 1;
-            // only print the less-common tags (skip the per-frame flood 0x81/0x8E/0xA8/0x05/0x2E)
+            // only print the less-common tags (skip the per-frame flood 0x81/0x8F/0xA9/0x05/0x2E)
             if (r.Tag is 0x81 or 0x8F or 0xA9 or 0x05 or 0x2E or 0x1B) continue;
             var bytes = m.Body.AsSpan(r.Start, Math.Min(r.Length, 20)).ToArray();
             Console.WriteLine($"{m.Tick,8} 0x{r.Tag:X2} ({r.Tag,3}) {r.Length,5}  {string.Join(" ", bytes.Select(x=>x.ToString("X2")))}");

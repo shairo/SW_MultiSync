@@ -101,7 +101,7 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0xB9: L = 52; break;   // vehicle component/body state runs: 2x(veh,idx,i32[3]) + u32 + u32
         case 0xBA: L = 48; break;   //   2 entries + u32
         case 0xBB: L = 45; break;   //   2 entries + u8
-        case 0xC0: L = 88; break;   //   4 entries + u32 RGBA (paint?), pairs with 0xC0
+        case 0xC0: L = 88; break;   //   4 entries + u32 RGBA (paint?), pairs with 0xC1
         case 0xC1: L = 100; break;  //   4x(veh,idx,i32[3],f32)
         case 0x04: L = 16; break;   // walkfail_20260919_125459 x13, always last record
         // --- subtype / payload-length driven ---

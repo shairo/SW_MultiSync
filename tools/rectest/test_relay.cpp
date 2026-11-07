@@ -23,14 +23,16 @@ int main(int argc, char** argv) {
     // --trace: print every 0x81 for (peer,veh) as the recipient would see it after injection
     uint64_t trPeer = 0; uint32_t trVeh = 0;
     for (int i = 2; i + 2 < argc; i++) if (!strcmp(argv[i], "--trace")) { trPeer = strtoull(argv[i+1], nullptr, 10); trVeh = (uint32_t)strtoul(argv[i+2], nullptr, 10); }
-    if (argc >= 3 && argv[2][0] != '-') {
-        int n = relay::load_config_file(argv[2]);
-        if (n < 0) { printf("cannot open config %s\n", argv[2]); return 1; }
+    const char* cfgPath = nullptr;   // first non-flag argument after the capture (skip --trace's two values)
+    for (int i = 2; i < argc; i++) { if (!strcmp(argv[i], "--trace")) { i += 2; continue; } if (argv[i][0] != '-') { cfgPath = argv[i]; break; } }
+    if (cfgPath) {
+        int n = relay::load_config_file(cfgPath);
+        if (n < 0) { printf("cannot open config %s\n", cfgPath); return 1; }
         const relay::Cfg& c = relay::g_cfg;
         printf("config %s: %d keys -> intervalMin=%d intervalMax=%d lodDenser=%d distLod=%d lag=%d "
                "relayMinGap=%d srcRatio=%.2f stale=%d gapOutlier=%.0f maxPerSend=%d budgetWindow=%d "
                "capKbpsPerPeer=%d\n",
-               argv[2], n, c.intervalMin, c.intervalMax, c.lodDenser, c.distLod, c.lag,
+               cfgPath, n, c.intervalMin, c.intervalMax, c.lodDenser, c.distLod, c.lag,
                c.relayMinGap, c.srcRatio, c.stale, c.gapOutlier, c.maxPerSend, c.budgetWindow, c.capKbpsPerPeer);
     }
     FILE* f = fopen(argv[1], "rb");
