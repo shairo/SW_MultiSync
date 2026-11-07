@@ -17,7 +17,8 @@ static double rdD(const uint8_t* p){ double v; memcpy(&v,p,8); return v; }
 static int32_t tile_of(double c) { return (int32_t)floor((c + 500.0) / 1000.0); }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { printf("usage: test_tiles <file.swcap>\n"); return 1; }
+    for (int i = 2; i < argc; i++) if (!strcmp(argv[i], "--legacy")) rec::g_legacy = true;  // pre-2026-11 capture
+    if (argc < 2) { printf("usage: test_tiles <file.swcap> [--legacy]\n"); return 1; }
     FILE* f = fopen(argv[1], "rb"); if (!f) { printf("cannot open\n"); return 1; }
     char hdr[7] = {0}; fread(hdr, 1, 6, f);
     if (hdr[0] != 'S' || hdr[5] != 0x02) { printf("not SWCAP v2\n"); return 1; }

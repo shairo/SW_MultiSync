@@ -49,6 +49,8 @@ the few types/offsets we touch). The analyzer `tools/swcap` is C# / net10.0
   0x81 dETA with recipient↔vehicle distance (native distance LOD, see protocol/sync.md); `test_freeze`
   replays `freeze.h` over a capture (must fire on the 214246_776_freeze file for peer …8477 only, on
   nothing else); `test_tiles` replays the `tiles.h` ledger and prints each peer's 5x5 ring. Build each from a vcvars64 shell: `cl /std:c++17 /O2 /EHsc /Fe:build	est_x.exe toolsectest	est_x.cpp`.
+- Captures from before the 2026-11 game update (server tags >= 0x8B renumbered, see protocol.md) need
+  `--legacy` on every `swcap` command and `test_*` tool. Temporary; drop with the old captures.
 - `build.bat` — builds DLL, inject.exe, swctl.exe, SWMultiSync.exe.
 - `package.bat` — build + stage `dist\SW_MultiSync_v<ver>\` + zip. Ships GUI, CLI, DLL, ini (with
   `relay=1` forced), `packaging/README_*.txt`, `ipc-protocol.md`. Version = `src/common/version.h`.

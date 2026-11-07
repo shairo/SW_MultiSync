@@ -20,7 +20,8 @@ struct Pose { uint64_t ms; double x,y,z; };
 struct Samp { double dist, speed; uint32_t gap, deta; uint64_t peer; uint32_t veh, tick; int bodies; uint64_t ms; double vx,vy,vz, px,py,pz; };
 
 int main(int argc, char** argv) {
-    if (argc < 2) { printf("usage: test_dist <file.swcap> [--csv out] [--peer S]\n"); return 1; }
+    for (int i = 2; i < argc; i++) if (!strcmp(argv[i], "--legacy")) rec::g_legacy = true;  // pre-2026-11 capture
+    if (argc < 2) { printf("usage: test_dist <file.swcap> [--legacy] [--csv out] [--peer S]\n"); return 1; }
     const char* csv = nullptr; uint64_t onlyPeer = 0; bool useGap = false;
     for (int i = 2; i < argc; i++) if (!strcmp(argv[i], "--gap")) useGap = true;
     for (int i = 2; i + 1 < argc; i++) {

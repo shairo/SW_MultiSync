@@ -1,5 +1,7 @@
 using SwCap;
 
+// --legacy (anywhere): pre-2026-11-update capture, see Records.Legacy.
+if (args.Contains("--legacy")) { Records.Legacy = true; args = args.Where(x => x != "--legacy").ToArray(); }
 if (args.Length < 2) { Usage(); return 1; }
 string cmd = args[0], path = args[1];
 string[] rest = args[2..];
@@ -544,7 +546,7 @@ static void AtTick(string path, string[] a)
             if (r.Status != RecStatus.Ok) continue;
             tagCount[r.Tag] = tagCount.GetValueOrDefault(r.Tag) + 1;
             // only print the less-common tags (skip the per-frame flood 0x81/0x8E/0xA8/0x05/0x2E)
-            if (r.Tag is 0x81 or 0x8E or 0xA8 or 0x05 or 0x2E or 0x1B) continue;
+            if (r.Tag is 0x81 or 0x8F or 0xA9 or 0x05 or 0x2E or 0x1B) continue;
             var bytes = m.Body.AsSpan(r.Start, Math.Min(r.Length, 20)).ToArray();
             Console.WriteLine($"{m.Tick,8} 0x{r.Tag:X2} ({r.Tag,3}) {r.Length,5}  {string.Join(" ", bytes.Select(x=>x.ToString("X2")))}");
         }
@@ -585,7 +587,7 @@ static void Events(string path, string[] a)
         foreach (var r in recs)
         {
             if (r.Status != RecStatus.Ok) { Console.WriteLine($"t+{ms,7}  tick {m.Tick,7}  0x{r.Tag:X2} {r.Status}"); break; }
-            if (!all && r.Tag is 0x81 or 0x8E or 0xA8 or 0xA6 or 0xA7 or 0x05 or 0x07 or 0x2E or 0x1B or 0x39 or 0x1D or 0x50 or 0x94 or 0x09) continue;
+            if (!all && r.Tag is 0x81 or 0x8F or 0xA9 or 0xA7 or 0xA8 or 0x05 or 0x07 or 0x2E or 0x1B or 0x39 or 0x1D or 0x50 or 0x95 or 0x09) continue;
             var bytes = m.Body.AsSpan(r.Start, Math.Min(r.Length, 24)).ToArray();
             Console.WriteLine($"t+{ms,7}  tick {m.Tick,7}  0x{r.Tag:X2} ({r.Tag,3}) {r.Length,6}  {string.Join(" ", bytes.Select(x => x.ToString("X2")))}  {r.Note}");
         }

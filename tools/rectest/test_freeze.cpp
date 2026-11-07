@@ -19,7 +19,8 @@
 static double rdD(const uint8_t* p){ double v; memcpy(&v,p,8); return v; }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { printf("usage: test_freeze <file.swcap> [--pose MS] [--def MS]\n"); return 1; }
+    for (int i = 2; i < argc; i++) if (!strcmp(argv[i], "--legacy")) rec::g_legacy = true;  // pre-2026-11 capture
+    if (argc < 2) { printf("usage: test_freeze <file.swcap> [--legacy] [--pose MS] [--def MS]\n"); return 1; }
     int poseMs = relay::g_cfg.freezePoseMs, defMs = relay::g_cfg.freezeDefMs;
     for (int i = 2; i + 1 < argc; i++) {
         if (!strcmp(argv[i], "--pose")) poseMs = atoi(argv[i+1]);

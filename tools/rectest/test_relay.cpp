@@ -18,11 +18,12 @@ static double rdD(const uint8_t* p){ double v; memcpy(&v,p,8); return v; }
 static float  rdF(const uint8_t* p){ float v; memcpy(&v,p,4); return v; }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { printf("usage: test_relay <file.swcap> [config.ini] [--trace <peer> <veh>]\n"); return 1; }
+    for (int i = 2; i < argc; i++) if (!strcmp(argv[i], "--legacy")) rec::g_legacy = true;  // pre-2026-11 capture
+    if (argc < 2) { printf("usage: test_relay <file.swcap> [--legacy] [config.ini] [--trace <peer> <veh>]\n"); return 1; }
     // --trace: print every 0x81 for (peer,veh) as the recipient would see it after injection
     uint64_t trPeer = 0; uint32_t trVeh = 0;
     for (int i = 2; i + 2 < argc; i++) if (!strcmp(argv[i], "--trace")) { trPeer = strtoull(argv[i+1], nullptr, 10); trVeh = (uint32_t)strtoul(argv[i+2], nullptr, 10); }
-    if (argc >= 3 && strcmp(argv[2], "--trace") != 0) {
+    if (argc >= 3 && argv[2][0] != '-') {
         int n = relay::load_config_file(argv[2]);
         if (n < 0) { printf("cannot open config %s\n", argv[2]); return 1; }
         const relay::Cfg& c = relay::g_cfg;

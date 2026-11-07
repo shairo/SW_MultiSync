@@ -5,6 +5,16 @@ a `u32 tag`. This file is the **index + master tag table**; details live in cate
 [`protocol/`](protocol/). Length rules are implemented in **`tools/swcap/Records.cs`** (source of truth);
 the analysis playbook is **`tools/swcap/README.md`**.
 
+> **2026-11 game update — server tag renumbering.** A new server tag was inserted at **0x8B**, so every
+> server→client tag **≥ 0x8B moved up by one** (old 0x8E popup → 0x8F, old 0xA8 look → 0xA9, …; 0x8A and below
+> unchanged; client→server tags unchanged). `Records.cs` / `rec.h` use the **new** numbering; the tables and
+> `protocol/*.md` below still use the **pre-update** numbering for tags ≥ 0x8B. Pre-update captures no longer
+> walk with the current rules. Also changed (session_20261107_212851_893, 100% walked after the fix):
+>
+> - **new 0x8B** (16 B): tag + f32[3]; xy rotates slowly at constant |xy|≈0.070, z=5e-5; sent to every peer
+>   every ~100–500 ticks (748 records / ~150 broadcasts in 6 min). Meaning candidate (global wind/current-like vector).
+> - **0x9E (old 0x9D) 67 → 87 B**: + u32 vehId + u32 (183…8448) + u32 0 + f32 + f32 (103 records / 17 events).
+
 - [transport.md](protocol/transport.md) — frame header, channels, fragmentation / bulk transfers
 - [reference.md](protocol/reference.md) — envelope, walker/recordCount, `--peer`, tools, scenario map, periodic tags, non-records
 - [lifecycle.md](protocol/lifecycle.md) — vehicle & object spawn / load / unload / despawn / destroy

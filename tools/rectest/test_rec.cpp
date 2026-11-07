@@ -3,11 +3,13 @@
 // `swcap validate <file>` — if the full% matches, the in-DLL walker matches the C# decoder.
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #include "../../src/hook/rec.h"
 
 int main(int argc, char** argv) {
-    if (argc < 2) { printf("usage: test_rec <file.swcap>\n"); return 1; }
+    for (int i = 2; i < argc; i++) if (!strcmp(argv[i], "--legacy")) rec::g_legacy = true;  // pre-2026-11 capture
+    if (argc < 2) { printf("usage: test_rec <file.swcap> [--legacy]\n"); return 1; }
     FILE* f = fopen(argv[1], "rb");
     if (!f) { printf("cannot open\n"); return 1; }
     char hdr[7] = {0}; fread(hdr, 1, 6, f);

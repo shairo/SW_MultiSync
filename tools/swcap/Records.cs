@@ -29,9 +29,14 @@ public static class Records
 
     // Decode the record whose tag is at `off`. Never reads past b.Length; if the computed length
     // would overrun, returns Status=Overrun (rule known but data short/misaligned).
+    // Pre-2026-11-update captures (--legacy): server tags >= 0x8B were one lower and 0x9D was 67 B. Tags are
+    // reported in the CURRENT numbering either way. Drop once old captures are retired.
+    public static bool Legacy;
+
     public static RecordInfo Decode(byte[] b, int off)
     {
         var r = new RecordInfo { Start = off, Tag = U32(b, off), Length = -1, Status = RecStatus.Unknown };
+        if (Legacy && r.Tag >= 0x8B && r.Tag <= 0xFF) r.Tag++;
         int end;
         switch (r.Tag)
         {
@@ -51,19 +56,19 @@ public static class Records
                 r.Length = 14; r.Status = off + 14 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"char={U32(b, off + 4)} hp={F32(b, off + 8):F1} u8=({b[off + 12]},{b[off + 13]})"; break;
 
-            case 0xA8: // PLAYER LOOK broadcast, fixed 22: tag + u16 peer_id + 8 B zero + f32 yaw + f32 pitch. Mirror of client 0x66 (count-matched 241:241, session_20260917_011112). VERIFIED
+            case 0xA9: // PLAYER LOOK broadcast, fixed 22: tag + u16 peer_id + 8 B zero + f32 yaw + f32 pitch. Mirror of client 0x66 (count-matched 241:241, session_20260917_011112). VERIFIED
                 r.Length = 22; r.Status = off + 22 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
 
             case 0x05: // unknown periodic, fixed 34 (tag + u32 id(=0x3E) + 26 B mostly zero). VERIFIED
                 r.Length = 34; r.Status = off + 34 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
 
-            case 0xA6: // SEAT KEY STATE broadcast, fixed 22: tag + u16 peer_id + u32 keyMask (bits0-3 WASD, 11-14 arrows, 15-20 hotkeys) + 12 B zero. Mirror of client 0x64. VERIFIED (session_20260916_002752)
+            case 0xA7: // SEAT KEY STATE broadcast, fixed 22: tag + u16 peer_id + u32 keyMask (bits0-3 WASD, 11-14 arrows, 15-20 hotkeys) + 12 B zero. Mirror of client 0x64. VERIFIED (session_20260916_002752)
                 r.Length = 22; r.Status = off + 22 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
 
             case 0x1A: // unknown, fixed 40. VERIFIED
                 r.Length = 40; r.Status = off + 40 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
 
-            case 0xA7: // SEAT AXIS broadcast, fixed 11: tag + u16 peer_id + u32 axisIdx (0..7) + u8 value. Mirror of client 0x65 (runs of 8 at seat enter). VERIFIED (session_20260917_011112)
+            case 0xA8: // SEAT AXIS broadcast, fixed 11: tag + u16 peer_id + u32 axisIdx (0..7) + u8 value. Mirror of client 0x65 (runs of 8 at seat enter). VERIFIED (session_20260917_011112)
                 r.Length = 11; r.Status = off + 11 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
 
             case 0x07: // SEAT-ENTRY SNAPSHOT broadcast, fixed 71: tag + u16 peer_id + zeros + f32 yaw + f32 pitch + zeros. Mirror of client 0x01 (73 B). Count-matched (session_20260917_011112)
@@ -77,7 +82,7 @@ public static class Records
                        // one per object (session_...012132, single-body coal; 0x1D=34 -> 511 recs, 0 bad).
                 r.Length = 34; r.Status = off + 34 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
 
-            case 0xB5: // vehicle TELEPORT / setVehiclePos: tag + u32 vehId + double[16] 4x4 transform
+            case 0xB6: // vehicle TELEPORT / setVehiclePos: tag + u32 vehId + double[16] 4x4 transform
                        // matrix (column-major; diagonal 1.0 = identity rot). Translation X,Y,Z at matrix
                        // indices 12,13,14 -> offsets 104/112/120. fixed 136. session_...211421 addon move.
                 r.Length = 136;
@@ -105,7 +110,7 @@ public static class Records
                 if (off + 20 <= b.Length)
                     r.Note = $"tree tile=({(int)U32(b, off + 8)},{BitConverter.ToInt32(b, off + 12)}) idx={U32(b, off + 16)}";
                 break;
-            case 0xAD: // TREE fall physics (pairs ~6 ticks after 0x3F): tag + u32 + float[3] (fall
+            case 0xAE: // TREE fall physics (pairs ~6 ticks after 0x3F): tag + u32 + float[3] (fall
                        // direction / impact). fixed 20. session_...223959.
                 r.Length = 20; r.Status = off + 20 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 if (off + 20 <= b.Length)
@@ -153,7 +158,7 @@ public static class Records
             case 0x88: // GAME SETTINGS bool array broadcast: tag + 33 x u8. Mirror of client 0x48 (sent on every settings-menu toggle). VERIFIED (session_20260917_005633)
                 r.Length = 37; r.Status = off + 37 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = "bools=" + string.Concat(Enumerable.Range(0, 33).Select(i => off + 4 + i < b.Length ? (char)('0' + b[off + 4 + i]) : '?')); break;
-            case 0x94: r.Length = 8;  r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break; // tag + u32 vehId; HIGH freq w/ multiple vehicles
+            case 0x95: r.Length = 8;  r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break; // tag + u32 vehId; HIGH freq w/ multiple vehicles
             case 0x4F: r.Length = 8;  r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun; // OBJECT despawn/collect: tag + u32 objectId. Object spawn is 0x4D. (session_...012132: 233 ids paired 0x4D spawn -> 0x4F despawn, ~0.8s lifetime)
                        r.Note = $"obj-despawn id={U32(b, off + 4)}"; break;
             // multiplayer: other-player avatar sync, emitted as a 0x0B+0x0C pair per remote player.
@@ -186,7 +191,12 @@ public static class Records
             case 0x89: // WIND DIRECTION broadcast: tag + f32 rad. Mirror of client 0x49; same value also lands in 0x5A[3].
                 r.Length = 8; r.Status = off + 8 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"f={F32(b, off + 4):F3}"; break;
-            case 0x8B: // DAY LENGTH (?) broadcast: tag + u32 (20/30/40 seen), mirror of client 0x4B; followed by 0x57 time.
+            case 0x8B: // NEW in the 2026-11 update (inserted here; every server tag >= 0x8B moved up by one). Fixed 16: tag + f32[3].
+                       // xy rotates slowly at constant |xy|~0.070, z = 5e-5; broadcast to every peer ~every 100-500 ticks. Meaning CANDIDATE
+                       // (wind/ocean-current-like global vector). session_20261107_212851_893
+                r.Length = 16; r.Status = off + 16 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"f=({F32(b, off + 4):G5},{F32(b, off + 8):G5},{F32(b, off + 12):G5})"; break;
+            case 0x8C: // DAY LENGTH (?) broadcast: tag + u32 (20/30/40 seen), mirror of client 0x4B; followed by 0x57 time.
                 r.Length = 8; r.Status = off + 8 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"u32={U32(b, off + 4)}"; break;
             case 0x59: // settings bool broadcast: tag + u8. 0x59 = client 0x32 (day/night cycle?), 0x5D = client 0x2C (weather override?), 0x8A = client 0x4A (wind-dir override?).
@@ -195,7 +205,7 @@ public static class Records
                 r.Length = 5; r.Status = off + 5 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"b={b[off + 4]}"; break;
             // --- combat-capture tags, boundaries from session_20260913_005757_200 (meanings CANDIDATE) ---
-            case 0x92: // tag + double[3] world pos + f32[4] (44 B). ~1:1 with 0x76 in the long-range fight.
+            case 0x93: // tag + double[3] world pos + f32[4] (44 B). ~1:1 with 0x76 in the long-range fight.
                 r.Length = 44; r.Status = off + 44 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"pos=({F64(b, off + 4):F0},{F64(b, off + 12):F0},{F64(b, off + 20):F0}) f=({F32(b, off + 28):F1},{F32(b, off + 32):F1},{F32(b, off + 36):F1},{F32(b, off + 40):F1})"; break;
             case 0x76: // tag + double[3] world pos + f32 (32 B). recordCount-verified (seq 1208776).
@@ -204,9 +214,10 @@ public static class Records
             case 0x31: // VOXEL event: tag + u32 vehId + i32 x + i32 y + i32 z (20 B), runs per vehicle (voxel damage list).
                 r.Length = 20; r.Status = off + 20 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)} voxel=({(int)U32(b, off + 8)},{(int)U32(b, off + 12)},{(int)U32(b, off + 16)})"; break;
-            case 0x9D: // tag + u32 id + u32 1 + double[3] pos + 7 x u32/f32 (0,1,0,0,0,0,1) + u8 1 + u16 0xFFFF (67 B), runs.
-                r.Length = 67; r.Status = off + 67 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
-                r.Note = $"id={U32(b, off + 4)} pos=({F64(b, off + 12):F0},{F64(b, off + 20):F0},{F64(b, off + 28):F0})"; break;
+            case 0x9E: // (old 0x9D) tag + u32 id + u32 1 + double[3] pos + 7 x u32/f32 (0,1,0,0,0,0,1) + u8 1 + u16 0xFFFF (67 B), then
+                       // since the 2026-11 update + u32 vehId + u32 (183..8448) + u32 (0) + f32 + f32 = 87 B. session_20261107_212851_893
+                r.Length = Legacy ? 67 : 87; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"id={U32(b, off + 4)} pos=({F64(b, off + 12):F0},{F64(b, off + 20):F0},{F64(b, off + 28):F0}) veh={U32(b, off + 67)} u={U32(b, off + 71)} f=({F32(b, off + 79):G4},{F32(b, off + 83):G4})"; break;
             case 0x7B: // NOTIFICATION (addon server.notify): tag + u16 n1 + title + u16 n2 + subtitle + u32 type = 12 + n1 + n2. VARIABLE.
             {
                 int n1 = (int)U16(b, off + 4); int n2 = (int)U16(b, off + 6 + n1);
@@ -214,11 +225,11 @@ public static class Records
                 r.Note = $"title={Str(b, off + 6, n1)} type={U32(b, off + 8 + n1 + n2)}"; break;
             }
             case 0x4C: // tag + u32 id (8 B) — emitted as a 0x4C/0x8F/0x3D/0x3B quartet per id (map-object family, see 0x3B).
-            case 0x8F:
+            case 0x90:
             case 0x3D:
                 r.Length = 8; r.Status = off + 8 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"id={U32(b, off + 4)}"; break;
-            case 0xA9: // tag + i32 tileX + i32 tileZ + u32 100 + u32 0 + f32 500 + f32 200 + u32 0 (32 B).
+            case 0xAA: // tag + i32 tileX + i32 tileZ + u32 100 + u32 0 + f32 500 + f32 200 + u32 0 (32 B).
                 r.Length = 32; r.Status = off + 32 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"tile=({(int)U32(b, off + 4)},{(int)U32(b, off + 8)})"; break;
             case 0x74: // tag + double[3] pos + u32 1 + f32 0.5 + f32 1.0 (40 B); paired with 0x75. CANDIDATE
@@ -234,13 +245,13 @@ public static class Records
                 r.Length = 11 + n; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"peer={U16(b, off + 4)} name={Str(b, off + 8, n)}"; break;
             }
-            case 0x8D: // PEER-ADDRESSED MESSAGE: tag + u16 peer_id + 6 B (01 01 01 00 00 00) + u16 n1 + text + u16 n2 + sender = 16 + n1 + n2.
+            case 0x8E: // PEER-ADDRESSED MESSAGE: tag + u16 peer_id + 6 B (01 01 01 00 00 00) + u16 n1 + text + u16 n2 + sender = 16 + n1 + n2.
             {
                 int n1 = (int)U16(b, off + 12); int n2 = (int)U16(b, off + 14 + n1);
                 r.Length = 16 + n1 + n2; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"peer={U16(b, off + 4)} text={Str(b, off + 14, n1)}"; break;
             }
-            case 0x91: // tag + u16 peer_id + u32 21 + u32 2 + u32 0 + u32 6 + i32 -7 + u16 1 (28 B).
+            case 0x92: // tag + u16 peer_id + u32 21 + u32 2 + u32 0 + u32 6 + i32 -7 + u16 1 (28 B).
                 r.Length = 28; r.Status = off + 28 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"peer={U16(b, off + 4)}"; break;
             case 0x5F: // tag + u16 peer_id + u32 (10 B).
@@ -249,19 +260,19 @@ public static class Records
             case 0x16: // tag + u16 peer_id + u32 + u8 (11 B).
                 r.Length = 11; r.Status = off + 11 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"peer={U16(b, off + 4)} u32={U32(b, off + 6)}"; break;
-            case 0xB8: // tag + u32 vehId + u32 + i32 + u32 + i32 -1 + u32 vehId + u32 + u32 1 + u32 1 + 12 B (52 B), runs.
+            case 0xB9: // tag + u32 vehId + u32 + i32 + u32 + i32 -1 + u32 vehId + u32 + u32 1 + u32 1 + 12 B (52 B), runs.
                 r.Length = 52; r.Status = off + 52 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)} u32={U32(b, off + 8)}"; break;
-            case 0xB9: // same header as 0xB8 + 8 B (48 B), runs.
+            case 0xBA: // same header as 0xB8 + 8 B (48 B), runs.
                 r.Length = 48; r.Status = off + 48 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)} u32={U32(b, off + 8)}"; break;
-            case 0xBA: // 2x(veh,idx,i32[3]) + u8 (45 B). walkfail_20260919_125459
+            case 0xBB: // 2x(veh,idx,i32[3]) + u8 (45 B). walkfail_20260919_125459
                 r.Length = 45; r.Status = off + 45 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)} u32={U32(b, off + 8)}"; break;
-            case 0xBF: // 4x(veh,idx,i32[3]) + u32 RGBA (88 B), pairs with 0xC0 on the same voxels. walkfail_20260919_125459
+            case 0xC0: // 4x(veh,idx,i32[3]) + u32 RGBA (88 B), pairs with 0xC0 on the same voxels. walkfail_20260919_125459
                 r.Length = 88; r.Status = off + 88 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)} rgba={U32(b, off + 84):X8}"; break;
-            case 0xC0: // 4x(veh,idx,i32[3],f32) (100 B). walkfail_20260919_125459
+            case 0xC1: // 4x(veh,idx,i32[3],f32) (100 B). walkfail_20260919_125459
                 r.Length = 100; r.Status = off + 100 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"veh={U32(b, off + 4)}"; break;
             case 0x04: // 16 B fixed, always the last record of its message. walkfail_20260919_125459 (x13)
@@ -283,7 +294,7 @@ public static class Records
                        r.Note = $"remove veh={U32(b, off + 4)}"; break;
 
             // --- vehicle spawn cluster (session_20260914_232332_784, solved ×6; VERIFY on more data) ---
-            case 0x96: r.Length = 13; r.Status = off + 13 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; // spawn create: tag + u32 id + 5B. Emitted as a PAIR (two 13-B 0x96: id then 0) = one create, two records.
+            case 0x97: r.Length = 13; r.Status = off + 13 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; // spawn create: tag + u32 id + 5B. Emitted as a PAIR (two 13-B 0x96: id then 0) = one create, two records.
                        r.Note = $"veh={U32(b, off + 4)}"; break;
             case 0x37: // spawn placement: tag + u32 vehId + double[3] pos + 12B + f32 + u8 u8 + u16 nA + name + u16 nB + strB (e.g. "tan524tan524") = 54 + nA + nB (54 when both empty). walkfail_20260919_125459
             {
@@ -297,7 +308,7 @@ public static class Records
                 r.Length = 90 + nA + nB; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"A={Str(b, off + 46, nA)} B={Str(b, off + 48 + nA, nB)} u32={U32(b, off + r.Length - 18)} veh={U32(b, off + r.Length - 14)}"; break;
             }
-            case 0x95: // MAP OBJECT create (addon addMapObject): tag + u32 objId + u16 n + label[n] = 10 + n. Always followed by a 0x3A map-label record carrying position / radius / colour. VERIFIED (session_20260917_010256, recordCount)
+            case 0x96: // MAP OBJECT create (addon addMapObject): tag + u32 objId + u16 n + label[n] = 10 + n. Always followed by a 0x3A map-label record carrying position / radius / colour. VERIFIED (session_20260917_010256, recordCount)
             {
                 int n = (int)U16(b, off + 8);
                 r.Length = 10 + n; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
@@ -369,7 +380,7 @@ public static class Records
                 r.Note = $"veh={U32(b, off + 4)} payload={U32(b, off + 8)}";
                 break;
 
-            case 0x8E: // popup: tag + u16 name + name + u16 show + u16 text + text + 4 floats + 3 u32
+            case 0x8F: // popup: tag + u16 name + name + u16 show + u16 text + text + 4 floats + 3 u32
             {
                 int p = off + 4;
                 int nameSize = (int)U16(b, p); p += 2 + nameSize;

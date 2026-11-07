@@ -16,32 +16,37 @@ inline uint32_t U32(const uint8_t* b, int len, int o) {
 
 // Length of the record whose tag u32 is at `off` in body[0..len). Returns -1 if the rule is unknown
 // or the computed length would overrun (walk must stop). Mirrors Records.Decode.
+// Pre-2026-11-update captures: server tags >= 0x8B were one lower and 0x9D was 67 B. Offline tools set
+// this (--legacy) to replay old captures; the live hook never does. Drop once old captures are retired.
+inline bool g_legacy = false;
+
 inline int decode_len(const uint8_t* b, int len, int off) {
     uint32_t tag = U32(b, len, off);
+    if (g_legacy && tag >= 0x8B && tag <= 0xFF) tag++;   // old numbering -> current
     int L = -1;
     switch (tag) {
         // --- fixed-length (see protocol/*.md for meaning) ---
         case 0x39: L = 36; break;
         case 0x38: L = 8;  break;   // vehicle despawn marker (with 0x2C)
         case 0x1D: L = 34; break;   // object position/physics sync (object 0x1B)
-        case 0xB5: L = 136; break;  // vehicle teleport / setVehiclePos (4x4 matrix)
+        case 0xB6: L = 136; break;  // vehicle teleport / setVehiclePos (4x4 matrix)
         case 0x5E: L = 29; break;   // player teleport: map fast-travel
         case 0x3F: L = 26; break;   // tree felled marker
-        case 0xAD: L = 20; break;   // tree fall physics
+        case 0xAE: L = 20; break;   // tree fall physics
         case 0x46: L = 12; break;   // tile streaming ring (x,z)
         case 0x49: L = 12; break;   // fog-of-war tile revealed (x,z), pairs w/ 0x45
         case 0x45: L = 13; break;   // fog tile state (x,z,u8)
         case 0x4A: L = 12; break;   // tile purchased (x,z), + 0x62
-        case 0x96: L = 13; break;   // vehicle create marker (13-B pair)
+        case 0x97: L = 13; break;   // vehicle create marker (13-B pair)
         case 0x37: {                                                    // vehicle spawn placement: +50 u16 nA + name + u16 nB + strB (54 when both empty)
             int a = (int)U16(b, len, off + 50);
             L = 54 + a + (int)U16(b, len, off + 52 + a); break;
         }
-        case 0xA8: L = 22; break;   // player look broadcast (peer_id, yaw, pitch)
+        case 0xA9: L = 22; break;   // player look broadcast (peer_id, yaw, pitch)
         case 0x05: L = 34; break;
-        case 0xA6: L = 22; break;   // seat key state (peer_id, keyMask)
+        case 0xA7: L = 22; break;   // seat key state (peer_id, keyMask)
         case 0x1A: L = 40; break;   // component interact broadcast
-        case 0xA7: L = 11; break;   // seat axis (peer_id, idx, value)
+        case 0xA8: L = 11; break;   // seat axis (peer_id, idx, value)
         case 0x07: L = 71; break;   // seat-entry snapshot (peer_id, yaw, pitch)
         case 0x1B: L = 34; break;
         case 0x09: L = 4;  break;
@@ -53,7 +58,7 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x67: L = 25; break;   // character vitals (hp)
         case 0x88: L = 37; break;   // game settings bool[33]
         case 0x0A: L = 5;  break;   // join sequence: tag + u8 0, between the 0x06 character dump and the 0x88 settings
-        case 0x94: L = 8;  break;
+        case 0x95: L = 8;  break;
         case 0x4F: L = 8;  break;
         case 0x0B: L = 38; break;
         case 0x0C: L = 14; break;
@@ -71,32 +76,33 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x2C: L = 8;  break;   // vehicle remove
         case 0x3B: L = 8;  break;   // map-object family (u32 id)
         case 0x4C: L = 8;  break;
-        case 0x8F: L = 8;  break;
+        case 0x90: L = 8;  break;
         case 0x3D: L = 8;  break;
         case 0x30: L = 36; break;
         case 0x34: L = 49; break;
         case 0x5A: L = 20; break;   // weather f32[3] + wind dir
         case 0x57: L = 8;  break;   // time of day
         case 0x89: L = 8;  break;   // wind direction
-        case 0x8B: L = 8;  break;   // day length?
+        case 0x8B: L = 16; break;   // NEW in the 2026-11 update: slowly rotating vec3 (|xy|~0.07), all peers ~every 100 ticks
+        case 0x8C: L = 8;  break;   // day length?
         case 0x59: L = 5;  break;   // settings bools
         case 0x5D: L = 5;  break;
         case 0x8A: L = 5;  break;
-        case 0x92: L = 44; break;   // combat: pos + f32[4]
+        case 0x93: L = 44; break;   // combat: pos + f32[4]
         case 0x76: L = 32; break;   // combat: pos + f32
         case 0x31: L = 20; break;   // voxel event (veh, x, y, z)
-        case 0x9D: L = 67; break;
-        case 0xA9: L = 32; break;
+        case 0x9E: L = g_legacy ? 67 : 87; break;   // 67 -> 87 in the 2026-11 update (+vehId, u32, u32, f32, f32)
+        case 0xAA: L = 32; break;
         case 0x74: L = 40; break;
         case 0x75: L = 36; break;
-        case 0x91: L = 28; break;   // per-peer lobby records
+        case 0x92: L = 28; break;   // per-peer lobby records
         case 0x5F: L = 10; break;
         case 0x16: L = 11; break;
-        case 0xB8: L = 52; break;   // vehicle component/body state runs: 2x(veh,idx,i32[3]) + u32 + u32
-        case 0xB9: L = 48; break;   //   2 entries + u32
-        case 0xBA: L = 45; break;   //   2 entries + u8
-        case 0xBF: L = 88; break;   //   4 entries + u32 RGBA (paint?), pairs with 0xC0
-        case 0xC0: L = 100; break;  //   4x(veh,idx,i32[3],f32)
+        case 0xB9: L = 52; break;   // vehicle component/body state runs: 2x(veh,idx,i32[3]) + u32 + u32
+        case 0xBA: L = 48; break;   //   2 entries + u32
+        case 0xBB: L = 45; break;   //   2 entries + u8
+        case 0xC0: L = 88; break;   //   4 entries + u32 RGBA (paint?), pairs with 0xC0
+        case 0xC1: L = 100; break;  //   4x(veh,idx,i32[3],f32)
         case 0x04: L = 16; break;   // walkfail_20260919_125459 x13, always last record
         // --- subtype / payload-length driven ---
         case 0x28: L = (U32(b, len, off + 8) == 1) ? 12 : 46; break;
@@ -117,14 +123,14 @@ inline int decode_len(const uint8_t* b, int len, int off) {
             int nB = (int)U16(b, len, off + 46 + nA);
             L = 90 + nA + nB; break;
         }
-        case 0x95: L = 10 + (int)U16(b, len, off + 8); break;          // map-object create marker (id + label)
+        case 0x96: L = 10 + (int)U16(b, len, off + 8); break;          // map-object create marker (id + label)
         case 0x7B: {                                                    // addon notification (title, subtitle, type)
             int n1 = (int)U16(b, len, off + 4);
             int n2 = (int)U16(b, len, off + 6 + n1);
             L = 12 + n1 + n2; break;
         }
         case 0x03: L = 11 + (int)U16(b, len, off + 6); break;          // player joined (peer_id, name)
-        case 0x8D: {                                                    // peer-addressed message
+        case 0x8E: {                                                    // peer-addressed message
             int n1 = (int)U16(b, len, off + 12);
             int n2 = (int)U16(b, len, off + 14 + n1);
             L = 16 + n1 + n2; break;
@@ -136,7 +142,7 @@ inline int decode_len(const uint8_t* b, int len, int off) {
             p += 12;
             L = p - off; break;
         }
-        case 0x8E: {                                                    // popup
+        case 0x8F: {                                                    // popup
             int p = off + 4;
             int nameSize = (int)U16(b, len, p); p += 2 + nameSize;
             p += 2;
