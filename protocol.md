@@ -16,7 +16,7 @@ the analysis playbook is **`tools/swcap/README.md`**.
 > - **0x9E (old 0x9D) 67 → 87 B**: + u32 vehId + u32 (183…8448) + u32 0 + f32 + f32 (103 records / 17 events).
 > - First seen in session_20261107_231116_959 (join + item use, 3.5 GB, walks 100 % both directions): SEND
 >   **0x21** 7 B (peer + u8, mirror of client 0x44; u8 1 → a 0x28 follows), **0x60** 6 B (peer), **0x84** 52 B
->   (idx + id + zeros + 1.0f, runs), **0x99** 12 B (mirror of client 0x5B). Client tags in protocol/client.md.
+>   (object pose: id + world tick + f64 xyz + f32 quat — layout from sk7z-xyz 6deeafb, 168/168 here), **0x99** 12 B (mirror of client 0x5B). Client tags in protocol/client.md.
 
 - [transport.md](protocol/transport.md) — frame header, channels, fragmentation / bulk transfers
 - [reference.md](protocol/reference.md) — envelope, walker/recordCount, `--peer`, tools, scenario map, periodic tags, non-records

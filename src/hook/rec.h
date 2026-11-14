@@ -86,7 +86,7 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x8B: L = 16; break;   // NEW in the 2026-11 update: slowly rotating vec3 (|xy|~0.07), all peers ~every 100 ticks
         case 0x21: L = 7;  break;   // tag + u16 peer_id + u8, mirror of client 0x44; u8 1 -> a 0x28 follows
         case 0x60: L = 6;  break;   // tag + u16 peer_id (with client 0x16)
-        case 0x84: L = 52; break;   // tag + u32 idx + u32 id + 40 B + f32 1.0, runs
+        case 0x84: L = 52; break;   // object pose: id + world tick + f64 xyz + f32 quat (sk7z-xyz 6deeafb)
         case 0x99: L = 12; break;   // tag + u32 + u32, mirror of client 0x5B
         case 0x8C: L = 8;  break;   // day length?
         case 0x59: L = 5;  break;   // settings bools

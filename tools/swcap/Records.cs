@@ -198,9 +198,11 @@ public static class Records
             case 0x60: // tag + u16 peer_id (6 B), sent with client 0x16 (bare).
                 r.Length = 6; r.Status = off + 6 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"peer={U16(b, off + 4)}"; break;
-            case 0x84: // tag + u32 idx (0,1,2..) + u32 id + 40 B zero + f32 1.0 (52 B), runs.
+            case 0x84: // OBJECT POSE: tag + u32 id + u32 world tick (= message tick) + f64 x,y,z + f32 quat = 52, runs.
+                       // Layout from sk7z-xyz 6deeafb (session_20261108_045606_169); confirmed here 168/168 (tick match,
+                       // |q| = 1) on session_20261107_231116_959, where every sample was at the origin with q = (0,0,0,1).
                 r.Length = 52; r.Status = off + 52 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
-                r.Note = $"idx={U32(b, off + 4)} id={U32(b, off + 8)}"; break;
+                if (r.Status == RecStatus.Ok) r.Note = $"id={U32(b, off + 4)} tick={U32(b, off + 8)} pos=({F64(b, off + 12):F0},{F64(b, off + 20):F0},{F64(b, off + 28):F0})"; break;
             case 0x99: // tag + u32 + u32 (12 B); mirror of client 0x5B (same payload, e.g. 196,134).
                 r.Length = 12; r.Status = off + 12 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"u32=({U32(b, off + 4)},{U32(b, off + 8)})"; break;
