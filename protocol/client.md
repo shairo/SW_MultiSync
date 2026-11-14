@@ -66,7 +66,7 @@ The client-side records don't carry it; the server stamps it.
 | 0x21 | 4 | bare | after 0x66/0x2F (walkfail_20260919_125459) |
 | 0x16 | 4 | bare | with SEND 0x60 (session_20261107_231116_959) |
 | 0x2D | 8 | **emote**: tag+3 · u32 emote index (0–8) | sent ~35× over ~0.55 s per emote; echoed 1:1 as SEND 0x5F (peer_id + same index). All 9 emotes in session_20261114_204309_125 (316 = 316) |
-| 0x35 | 50 | tag+3 · u32 10 · u32 · … · u32 -1 | session_20261107_231116_959 (2 samples) |
+| 0x35 | 50 | **equipment-box swap**: tag+3 · u32 slot · u32 vehId · u32 (0; body?) · i32 box voxel x,y,z · item data (type 0 = empty, i.e. take out) | broadcast as SEND 0x20 (52 B, + peer_id). 5 in / 5 out on veh 19 (session_20261114_212327_167) |
 | 0x44 | 5 | tag+3 · u8, runs; u8 1 is followed by a 0x51 | broadcast as SEND 0x21 (7 B) (session_20261107_231116_959) |
 | 0x4E | 174 | **drop equipment**: tag+3 · u32 slot · item data · f64 matrix · world pos | server spawns it as an object (SEND 0x4D, payload 323) + 0x26/0x28/0x29 slot updates. 6 samples (session_20261107_231116_959, 20261114_211508_692) |
 | 0x4D | 60 | **pick up equipment**: tag+3 · u32 slot · item data · u32 objId | server removes the object (SEND 0x4F) + 0x27/0x28/0x29. 5 samples (session_20261114_211508_692) |

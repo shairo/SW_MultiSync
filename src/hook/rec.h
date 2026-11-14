@@ -52,7 +52,7 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x09: L = 4;  break;
         case 0x14: L = 30; break;   // seat enter
         case 0x15: L = 10; break;   // seat exit
-        case 0x20: L = 52; break;
+        case 0x20: L = 52; break;   // equipment-box swap broadcast (peer + client 0x35)
         case 0x55: L = 31; break;
         case 0x62: L = 12; break;   // load/purchase companion (u32 20000, u32 5)
         case 0x67: L = 25; break;   // character vitals (hp)
@@ -251,7 +251,7 @@ inline int decode_client_len(const uint8_t* b, int len, int off) {
         case 0x16: L = 4;  break;   // bare (with server 0x60)
         case 0x08: L = 5;  break;   // DROP KEY: tag + u8 1 = down, 0 = up -> 0x06 release (long hold = throw); server 0x18
         case 0x2D: L = 8;  break;   // EMOTE: tag + u32 emote 0..8, ~35 in a row per emote; server echoes 0x5F
-        case 0x35: L = 50; break;
+        case 0x35: L = 50; break;   // equipment-box swap: slot + vehId + body? + voxel + item data
         case 0x44: L = 5;  break;   // tag + u8, runs; u8 1 precedes a 0x51 (server 0x21)
         case 0x4E: L = 174; break;  // DROP equipment: slot + item data + f64 matrix + pos (server: 0x4D object spawn)
         case 0x4D: L = 60; break;   // PICK UP equipment: slot + item data + objId (server: 0x4F despawn)

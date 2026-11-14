@@ -137,7 +137,11 @@ public static class Records
             case 0x09: r.Length = 4;  r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break; // bare tag/flag
             case 0x14: r.Length = 30; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break; // S3/S5/S6 button-ish
             case 0x15: r.Length = 10; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break; // S3/S6, pairs with 0x61
-            case 0x20: r.Length = 52; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break; // S4 equip-adjacent
+            case 0x20: // EQUIPMENT-BOX SWAP broadcast (52 B): tag + u16 peer_id + u32 slot + item data (type 0 = empty) ... +
+                       // u32 vehId + u32 (0; body?) + i32 box voxel x,y,z. Mirror of client 0x35: the player's slot and the
+                       // vehicle box swap contents (put in / take out). session_20261114_212327_167 (5 in, 5 out).
+                r.Length = 52; r.Status = off + r.Length <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                if (r.Status == RecStatus.Ok) r.Note = $"peer={U16(b, off + 4)} slot={U32(b, off + 6)} item={U32(b, off + 10)} veh={U32(b, off + 32)} voxel=({(int)U32(b, off + 40)},{(int)U32(b, off + 44)},{(int)U32(b, off + 48)})"; break;
             case 0x50: // NPC/object state (position + HP). VARIABLE = 12 + u32 payloadLen@8. Across all
                        // captures len is 76 (payload 64, the common single form, 3333×) or 328 (payload
                        // 316 = 124-B header + 3×64-B entries; this server's addon target list, id 3727,
