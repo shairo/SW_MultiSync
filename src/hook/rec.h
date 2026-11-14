@@ -45,7 +45,7 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0xA9: L = 22; break;   // player look broadcast (peer_id, yaw, pitch)
         case 0x05: L = 34; break;
         case 0xA7: L = 22; break;   // seat key state (peer_id, keyMask)
-        case 0x1A: L = 40; break;   // component interact broadcast
+        case 0x1A: L = 40; break;   // button press broadcast: peer, vehId, body?, voxel xyz, pressed, f32[3] hit
         case 0xA8: L = 11; break;   // seat axis (peer_id, idx, value)
         case 0x07: L = 71; break;   // seat-entry snapshot (peer_id, yaw, pitch)
         case 0x1B: L = 34; break;
@@ -92,8 +92,8 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x59: L = 5;  break;   // settings bools
         case 0x5D: L = 5;  break;
         case 0x8A: L = 5;  break;
-        case 0x93: L = 44; break;   // combat: pos + f32[4]
-        case 0x76: L = 32; break;   // combat: pos + f32
+        case 0x93: L = 44; break;   // launch: f64 pos + f32 velocity xyz + f32 speed
+        case 0x76: L = 32; break;   // burst (chaff) at f64 pos + f32 (360)
         case 0x31: L = 20; break;   // voxel event (veh, x, y, z)
         case 0x9E: L = g_legacy ? 67 : 87; break;   // 67 -> 87 in the 2026-11 update (+vehId, u32, u32, f32, f32)
         case 0xAA: L = 32; break;

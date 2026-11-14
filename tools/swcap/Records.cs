@@ -65,8 +65,11 @@ public static class Records
             case 0xA7: // SEAT KEY STATE broadcast, fixed 22: tag + u16 peer_id + u32 keyMask (bits0-3 WASD, 11-14 arrows, 15-20 hotkeys) + 12 B zero. Mirror of client 0x64. VERIFIED (session_20260916_002752)
                 r.Length = 22; r.Status = off + 22 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
 
-            case 0x1A: // unknown, fixed 40. VERIFIED
-                r.Length = 40; r.Status = off + 40 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
+            case 0x1A: // BUTTON PRESS broadcast, fixed 40: tag + u16 peer_id + u32 vehId + u32 (0; body?) + i32 voxel x,y,z (= editor
+                       // coords) + u8 pressed (1 then 0 ~0.1 s later) + f32[3] hit offset in the block (|v| <= 0.125) + u8.
+                       // session_20261114_204910_560 (4 buttons at (-10,1,17/15/12/10) on veh 17). VERIFIED
+                r.Length = 40; r.Status = off + 40 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                if (r.Status == RecStatus.Ok) r.Note = $"peer={U16(b, off + 4)} veh={U32(b, off + 6)} voxel=({(int)U32(b, off + 14)},{(int)U32(b, off + 18)},{(int)U32(b, off + 22)}) pressed={b[off + 26]}"; break;
 
             case 0xA8: // SEAT AXIS broadcast, fixed 11: tag + u16 peer_id + u32 axisIdx (0..7) + u8 value. Mirror of client 0x65 (runs of 8 at seat enter). VERIFIED (session_20260917_011112)
                 r.Length = 11; r.Status = off + 11 <= b.Length ? RecStatus.Ok : RecStatus.Overrun; break;
@@ -220,10 +223,12 @@ public static class Records
                 r.Length = 5; r.Status = off + 5 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"b={b[off + 4]}"; break;
             // --- combat-capture tags, boundaries from session_20260913_005757_200 (meanings CANDIDATE) ---
-            case 0x93: // tag + double[3] world pos + f32[4] (44 B). ~1:1 with 0x76 in the long-range fight.
+            case 0x93: // LAUNCH: tag + double[3] world pos + f32 velocity x,y,z (y up) + f32 speed (44 B). Flares fired straight up at
+                       // 10 / 20 m/s gave (0,10,0,10) / (0,20,0,20), session_20261114_204910_560. ~1:1 with 0x76 in the long-range fight.
                 r.Length = 44; r.Status = off + 44 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"pos=({F64(b, off + 4):F0},{F64(b, off + 12):F0},{F64(b, off + 20):F0}) f=({F32(b, off + 28):F1},{F32(b, off + 32):F1},{F32(b, off + 36):F1},{F32(b, off + 40):F1})"; break;
-            case 0x76: // tag + double[3] world pos + f32 (32 B). recordCount-verified (seq 1208776).
+            case 0x76: // BURST: tag + double[3] world pos + f32 (360.0 for chaff) (32 B). Chaff: same tick as the shell's 0x4F,
+                       // 0.48 s after launch (session_20261114_204910_560). recordCount-verified (seq 1208776).
                 r.Length = 32; r.Status = off + 32 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"pos=({F64(b, off + 4):F0},{F64(b, off + 12):F0},{F64(b, off + 20):F0}) f={F32(b, off + 28):F1}"; break;
             case 0x31: // VOXEL event: tag + u32 vehId + i32 x + i32 y + i32 z (20 B), runs per vehicle (voxel damage list).
