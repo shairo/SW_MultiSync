@@ -70,7 +70,8 @@ Mean: ✅ decoded · △ partial · ❌ unknown.
 | 0x92 0x76 0x31 0x9D 0x74 0x75 0xA9 | 146 118 49 157 116 117 169 | combat-capture records, lengths verified (44/32/20/67/40/36/32), meaning candidate | ✅ | △ | damage-combat |
 | 0x7B | 123 | addon notification (title/subtitle/type) | ✅ | ✅ | damage-combat |
 | 0x4C 0x8F 0x3D | 76 143 61 | map-object remove family (8 B, u32 id) with 0x3B | ✅ | △ | damage-combat |
-| 0x03 0x8D 0x91 0x5F 0x16 | 3 141 145 95 22 | lobby / per-peer records (player joined, peer message, …) | ✅ | △ | damage-combat |
+| 0x03 0x8D 0x91 0x16 | 3 141 145 22 | lobby / per-peer records (player joined, peer message, …) | ✅ | △ | damage-combat |
+| 0x5F | 95 | **emote** broadcast: u16 peer_id · u32 emote index 0–8 — 1:1 echo of client 0x2D (session_20261114_204309_125) | ✅ | ✅ | client |
 | 0xB8 0xB9 0xBA | 184 185 186 | vehicle voxel runs: 2×(veh, idx, i32[3]) + u32,u32 / u32 / u8 (52 / 48 / 45 B) | ✅ | △ | damage-combat |
 | 0xBF 0xC0 | 191 192 | vehicle voxel runs ×4: + u32 RGBA (88 B) / each entry + f32 (100 B); paired on the same voxels | ✅ | △ | damage-combat |
 | 0x04 | 4 | 16 B fixed, always last record of its message (walkfail_20260919_125459 ×13) | ✅ | ❌ | — |

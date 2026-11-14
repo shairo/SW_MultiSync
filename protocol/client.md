@@ -64,7 +64,7 @@ The client-side records don't carry it; the server stamps it.
 | 0x05 | 9 | vehicle-related ack | tag+3 · u32 vehId · u8 1 (walkfail_20260919_125459) |
 | 0x21 | 4 | bare | after 0x66/0x2F (walkfail_20260919_125459) |
 | 0x16 | 4 | bare | with SEND 0x60 (session_20261107_231116_959) |
-| 0x2D | 8 | tag+3 · u32, runs | session_20261107_231116_959 |
+| 0x2D | 8 | **emote**: tag+3 · u32 emote index (0–8) | sent ~35× over ~0.55 s per emote; echoed 1:1 as SEND 0x5F (peer_id + same index). All 9 emotes in session_20261114_204309_125 (316 = 316) |
 | 0x35 | 50 | tag+3 · u32 10 · u32 · … · u32 -1 | session_20261107_231116_959 (2 samples) |
 | 0x44 | 5 | tag+3 · u8, runs; u8 1 is followed by a 0x51 | broadcast as SEND 0x21 (7 B) (session_20261107_231116_959) |
 | 0x4E | 174 | item payload (like 0x51) + double matrix + pos | one sample only — CANDIDATE (session_20261107_231116_959) |

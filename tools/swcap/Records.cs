@@ -269,7 +269,8 @@ public static class Records
             case 0x92: // tag + u16 peer_id + u32 21 + u32 2 + u32 0 + u32 6 + i32 -7 + u16 1 (28 B).
                 r.Length = 28; r.Status = off + 28 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"peer={U16(b, off + 4)}"; break;
-            case 0x5F: // tag + u16 peer_id + u32 (10 B).
+            case 0x5F: // EMOTE broadcast: tag + u16 peer_id + u32 emote index 0..8 (10 B). 1:1 echo of client 0x2D
+                       // (session_20261114_204309_125: all 9 emotes, 316 client 0x2D = 316 SEND 0x5F).
                 r.Length = 10; r.Status = off + 10 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"peer={U16(b, off + 4)} u32={U32(b, off + 6)}"; break;
             case 0x16: // tag + u16 peer_id + u32 + u8 (11 B).
