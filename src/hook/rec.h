@@ -84,6 +84,10 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x57: L = 8;  break;   // time of day
         case 0x89: L = 8;  break;   // wind direction
         case 0x8B: L = 16; break;   // NEW in the 2026-11 update: slowly rotating vec3 (|xy|~0.07), all peers ~every 100 ticks
+        case 0x21: L = 7;  break;   // tag + u16 peer_id + u8, mirror of client 0x44; u8 1 -> a 0x28 follows
+        case 0x60: L = 6;  break;   // tag + u16 peer_id (with client 0x16)
+        case 0x84: L = 52; break;   // tag + u32 idx + u32 id + 40 B + f32 1.0, runs
+        case 0x99: L = 12; break;   // tag + u32 + u32, mirror of client 0x5B
         case 0x8C: L = 8;  break;   // day length?
         case 0x59: L = 5;  break;   // settings bools
         case 0x5D: L = 5;  break;
@@ -243,6 +247,12 @@ inline int decode_client_len(const uint8_t* b, int len, int off) {
         case 0x22: L = 29; break;   // tag + double[3] + u8
         case 0x1B: case 0x29: case 0x15: case 0x68: L = 8; break;   // tag + u32 (vehicle load acks etc.)
         case 0x09: L = 52; break;
+        case 0x16: L = 4;  break;   // bare (with server 0x60)
+        case 0x2D: L = 8;  break;   // tag + u32, runs
+        case 0x35: L = 50; break;
+        case 0x44: L = 5;  break;   // tag + u8, runs; u8 1 precedes a 0x51 (server 0x21)
+        case 0x4E: L = 174; break;  // item payload + double matrix + pos; one sample only (CANDIDATE)
+        case 0x5B: L = 12; break;   // tag + u32 + u32 (server 0x99)
         case 0x02: L = 6 + (int)U16(b, len, off + 4); break;          // chat text
         case 0x0A: L = 40 + (int)U16(b, len, off + 38); break;        // component interact (name)
         case 0x52: L = 23 + (int)U16(b, len, off + 12); break;        // item action request

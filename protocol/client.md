@@ -63,6 +63,12 @@ The client-side records don't carry it; the server stamps it.
 | 0x17 | 8+u32 | **character appearance** (sent on seat exit) | tag+3 · u32 remaining len (0x6A → 114 B total) · u8 1 · 13× RGBA outfit colours · ints — echoed verbatim as SEND 0x61 (116) |
 | 0x05 | 9 | vehicle-related ack | tag+3 · u32 vehId · u8 1 (walkfail_20260919_125459) |
 | 0x21 | 4 | bare | after 0x66/0x2F (walkfail_20260919_125459) |
+| 0x16 | 4 | bare | with SEND 0x60 (session_20261107_231116_959) |
+| 0x2D | 8 | tag+3 · u32, runs | session_20261107_231116_959 |
+| 0x35 | 50 | tag+3 · u32 10 · u32 · … · u32 -1 | session_20261107_231116_959 (2 samples) |
+| 0x44 | 5 | tag+3 · u8, runs; u8 1 is followed by a 0x51 | broadcast as SEND 0x21 (7 B) (session_20261107_231116_959) |
+| 0x4E | 174 | item payload (like 0x51) + double matrix + pos | one sample only — CANDIDATE (session_20261107_231116_959) |
+| 0x5B | 12 | tag+3 · u32 · u32 | broadcast as SEND 0x99 (12 B) (session_20261107_231116_959) |
 
 ### 0x0A observations
 - Every press is a **pair** (pressed=1 then pressed=0, 80–550 ms apart) with identical voxel + hit

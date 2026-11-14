@@ -191,6 +191,19 @@ public static class Records
             case 0x89: // WIND DIRECTION broadcast: tag + f32 rad. Mirror of client 0x49; same value also lands in 0x5A[3].
                 r.Length = 8; r.Status = off + 8 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"f={F32(b, off + 4):F3}"; break;
+            // --- first seen in session_20261107_231116_959 (join + item use); lengths verified (100 % walked), meanings CANDIDATE ---
+            case 0x21: // tag + u16 peer_id + u8 (7 B), runs; mirror of client 0x44. u8 1 -> a full 0x28 (46 B) follows.
+                r.Length = 7; r.Status = off + 7 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"peer={U16(b, off + 4)} b={(off + 6 < b.Length ? b[off + 6] : -1)}"; break;
+            case 0x60: // tag + u16 peer_id (6 B), sent with client 0x16 (bare).
+                r.Length = 6; r.Status = off + 6 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"peer={U16(b, off + 4)}"; break;
+            case 0x84: // tag + u32 idx (0,1,2..) + u32 id + 40 B zero + f32 1.0 (52 B), runs.
+                r.Length = 52; r.Status = off + 52 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"idx={U32(b, off + 4)} id={U32(b, off + 8)}"; break;
+            case 0x99: // tag + u32 + u32 (12 B); mirror of client 0x5B (same payload, e.g. 196,134).
+                r.Length = 12; r.Status = off + 12 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"u32=({U32(b, off + 4)},{U32(b, off + 8)})"; break;
             case 0x8B: // NEW in the 2026-11 update (inserted here; every server tag >= 0x8B moved up by one). Fixed 16: tag + f32[3].
                        // xy rotates slowly at constant |xy|~0.070, z = 5e-5; broadcast to every peer ~every 100-500 ticks. Meaning CANDIDATE
                        // (wind/ocean-current-like global vector). session_20261107_212851_893

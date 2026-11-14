@@ -14,6 +14,9 @@ the analysis playbook is **`tools/swcap/README.md`**.
 > - **new 0x8B** (16 B): tag + f32[3]; xy rotates slowly at constant |xy|≈0.070, z=5e-5; sent to every peer
 >   every ~100–500 ticks (748 records / ~150 broadcasts in 6 min). Meaning candidate (global wind/current-like vector).
 > - **0x9E (old 0x9D) 67 → 87 B**: + u32 vehId + u32 (183…8448) + u32 0 + f32 + f32 (103 records / 17 events).
+> - First seen in session_20261107_231116_959 (join + item use, 3.5 GB, walks 100 % both directions): SEND
+>   **0x21** 7 B (peer + u8, mirror of client 0x44; u8 1 → a 0x28 follows), **0x60** 6 B (peer), **0x84** 52 B
+>   (idx + id + zeros + 1.0f, runs), **0x99** 12 B (mirror of client 0x5B). Client tags in protocol/client.md.
 
 - [transport.md](protocol/transport.md) — frame header, channels, fragmentation / bulk transfers
 - [reference.md](protocol/reference.md) — envelope, walker/recordCount, `--peer`, tools, scenario map, periodic tags, non-records
