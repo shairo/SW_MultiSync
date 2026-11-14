@@ -20,6 +20,7 @@
 #include "steam_min.h"
 #include "rec.h"
 #include "relay.h"
+#include "addon.h"
 #include "stats.h"
 #include "freeze.h"
 #include "tiles.h"
@@ -411,12 +412,12 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
                 }
                 off += L;
             }
-            if (g_relay) {                                           // build the injected copy
+            if (g_relay || !relay::g_alias.empty() || !relay::g_releaseSnap.empty() || !relay::g_standby.empty() || relay::g_orbit.on) {   // build the injected copy (alias / orbit work with relay off)
                 int cap = (int)cub + relay::kMaxPerSend * relay::kMaxRecLen;
                 inj = static_cast<uint8_t*>(malloc(cap));
                 if (inj) {
                     uint64_t recBefore = relay::g_injRecords + relay::g_rewrites;
-                    newcub = relay::build_inject(sid, static_cast<const uint8_t*>(data), (int)cub, inj, cap, tick);
+                    newcub = relay::build_inject(sid, static_cast<const uint8_t*>(data), (int)cub, inj, cap, tick, g_relay);
                     if (newcub > 0) {
                         ps.injSends++; ps.injBytes += (uint64_t)(newcub - (int)cub);
                         ps.injRecords += (relay::g_injRecords + relay::g_rewrites) - recBefore;
@@ -610,6 +611,35 @@ static void write_status(json::JsonW& w) {
         .kv("sends", relay::g_injSends).kv("appended", relay::g_injRecords)
         .kv("rewritten", relay::g_rewrites).kv("bytes", relay::g_injBytes).end();
     w.kv("seq", g_seq).kv("marks", g_markCount).kv("freezeEvents", freeze::g_events);
+    w.key("addon").obj()
+        .kvb("offsetKnown", addon::g_kKnown).kv("offset", addon::g_k).kv("source", addon::source_name())
+        .kvb("matchedKnown", addon::g_kMatchKnown).kv("matchedOffset", addon::g_kMatch)
+        .kvb("arrivalKnown", addon::g_kArrKnown).kv("arrivalOffset", addon::g_kArr).kv("disagree", addon::g_disagree)
+        .kv("lastTc", (unsigned)addon::g_lastTc)
+        .kv("batches", addon::g_batches).kv("samples", addon::g_samples).kv("fed", addon::g_fed)
+        .kv("bad", addon::g_bad).kv("votes", addon::g_voteCount).kv("resets", addon::g_resets)
+        .kv("aliasRecords", relay::g_aliasRecords)
+        .kv("aliasSnaps", relay::g_aliasSnaps)
+        .kv("aliasCacheStarts", relay::g_aliasCacheStarts)
+        .kv("parked", (uint64_t)relay::g_park.size())
+        .kv("parkRecords", relay::g_parkRecords)
+        .kv("standby", (unsigned)relay::g_standby.size())
+        .kv("standbyRecords", relay::g_standbyRecords);
+    w.key("alias").arr();
+    for (auto& a : relay::g_alias) w.arr().num((unsigned)a.first).num((unsigned)a.second).end();
+    w.end();
+    {
+        int64_t am; int as;
+        bool have = addon::arrival_mode(am, as);
+        w.key("arrival").obj().kv("samples", addon::g_arrSamples).kv("skipped", addon::g_arrSkipped)
+         .kv("window", addon::g_nArr).kv("support", as);
+        if (have) w.kv("offset", am);
+        w.key("hist").obj();
+        std::map<int64_t, int> h; for (int i = 0; i < addon::g_nArr; i++) h[addon::g_arr[i]]++;
+        for (auto& kv : h) { char k[24]; snprintf(k, sizeof k, "%lld", (long long)kv.first); w.kv(k, kv.second); }
+        w.end().end();
+    }
+    w.end();
 }
 static void write_peers(json::JsonW& w) {
     uint64_t now = GetTickCount64();
@@ -653,6 +683,7 @@ static void write_vehicles(json::JsonW& w) {
          .key("pos").arr().num(v.cx).num(v.cy).num(v.cz).end()
          .key("rot").arr().num((double)v.cq[0]).num((double)v.cq[1]).num((double)v.cq[2]).num((double)v.cq[3]).end()
          .kv("srcGap", v.srcGap);   // I_src: EMA of ticks between fresh samples (0 = unknown)
+        if (v.addonT) w.kv("addonTick", (unsigned)v.addonT);   // last addon.poses sample (world tick)
         auto grp = relay::g_group.find(kv.first);
         if (grp != relay::g_group.end()) w.kv("group", (unsigned)grp->second);   // absent: spawned before we hooked
         // which recipients see this vehicle, and how coarsely (native gap in ticks = distance proxy)
@@ -722,6 +753,43 @@ static std::string ipc_handle(const std::string& line) {
         w.kvb("ok", true).kv("nowMs", GetTickCount64()); write_peers(w);
     } else if (cmd == "vehicles.get") {
         w.kvb("ok", true).kv("nowMs", GetTickCount64()); write_vehicles(w);
+    } else if (cmd == "debug.clone") {
+        // experiment only: give vehicle `to` (e.g. a static fake that never gets a native 0x81) the
+        // record template of vehicle `from` (same design, non-static), with the vehicle id patched in.
+        double from = 0, to = 0;
+        json::get_num(line.c_str(), "from", from); json::get_num(line.c_str(), "to", to);
+        auto fit = relay::g_veh.find((uint32_t)from);
+        if (from <= 0 || to <= 0 || fit == relay::g_veh.end() || fit->second.len <= 0) {
+            w.kvb("ok", false).kv("error", "from has no record template");
+        } else {
+            relay::Veh copy = fit->second;
+            uint32_t tid = (uint32_t)to;
+            memcpy(copy.bytes + 4, &tid, 4);
+            copy.addonT = 0;
+            relay::g_veh[tid] = copy;
+            logf("== debug.clone template %u -> %u len=%d (ipc) ==\n", (unsigned)from, tid, copy.len);
+            w.kvb("ok", true).kv("from", (unsigned)from).kv("to", (unsigned)tid).kv("len", copy.len);
+        }
+    } else if (cmd == "debug.orbit") {
+        // experiment only (never on by default, not in the GUI): circle a vehicle by records alone
+        double veh = 0, en = 1, v;
+        json::get_num(line.c_str(), "veh", veh);
+        if (json::get_num(line.c_str(), "enabled", v)) en = v;
+        relay::Orbit o = relay::g_orbit;
+        o.on = en != 0 && veh > 0; o.veh = (uint32_t)veh;
+        if (json::get_num(line.c_str(), "x", v)) o.cx = v;
+        if (json::get_num(line.c_str(), "y", v)) o.cy = v;
+        if (json::get_num(line.c_str(), "z", v)) o.cz = v;
+        if (json::get_num(line.c_str(), "r", v) && v > 0) o.r = v;
+        if (json::get_num(line.c_str(), "period", v) && v >= 10) o.period = v;
+        relay::g_orbit = o;
+        logf("== debug.orbit veh=%u on=%d center=(%.1f,%.1f,%.1f) r=%.1f period=%.0f (ipc) ==\n",
+             o.veh, (int)o.on, o.cx, o.cy, o.cz, o.r, o.period);
+        w.kvb("ok", true).kvb("on", o.on).kv("veh", (unsigned)o.veh).kv("records", relay::g_orbitRecords);
+    } else if (cmd == "addon.poses") {
+        int fed = 0, n = addon::on_batch(line.c_str(), g_worldTick, fed);
+        if (n < 0) w.kvb("ok", false).kv("error", "need tc and data[[id,x,y,z,qx,qy,qz,qw],...]");
+        else w.kvb("ok", true).kv("records", n).kv("fed", fed).kvb("offsetKnown", addon::g_kKnown).kv("offset", addon::g_k);
     } else if (cmd == "relay.set" || cmd == "mutate.set") {
         bool en;
         if (!json::get_bool(line.c_str(), "enabled", en)) { w.kvb("ok", false).kv("error", "missing enabled"); }
@@ -888,6 +956,7 @@ static DWORD WINAPI Worker(LPVOID) {
 
     InitializeCriticalSection(&g_cs);
     g_startMs = GetTickCount64();
+    addon::install();
 
     SYSTEMTIME st; GetLocalTime(&st);
     char* stamp = g_stamp;

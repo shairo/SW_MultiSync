@@ -64,7 +64,7 @@ enum {
     // header
     ID_SERVER_TXT, ID_DLL_TXT, ID_INJECT_BTN, ID_AUTO_CHK, ID_VERSION_TXT,
     // status tab
-    ID_RELAY_BTN, ID_RELAY_NOTE, ID_TRAFFIC_TXT, ID_WALK_TXT, ID_PEERS_LV, ID_VEH_LV, ID_PEERS_LBL, ID_VEH_LBL, ID_VEH_CHK,
+    ID_RELAY_BTN, ID_RELAY_NOTE, ID_TRAFFIC_TXT, ID_WALK_TXT, ID_ADDON_TXT, ID_ADDON_BTN, ID_PEERS_LV, ID_VEH_LV, ID_PEERS_LBL, ID_VEH_LBL, ID_VEH_CHK,
     // settings tab
     ID_CFG_LV, ID_CFG_NAME, ID_CFG_EDIT, ID_CFG_APPLY, ID_CFG_HELP, ID_CFG_SAVE, ID_CFG_RELOAD, ID_CFG_NOTE,
     // startup tab (edits swhook.ini directly; no DLL needed)
@@ -262,7 +262,12 @@ static void render_status() {
     bool up = g_dllUp;
     EnableWindow(H(ID_RELAY_BTN), up && g_hooked);
     set(ID_RELAY_BTN, !up ? L"同期改善: —" : g_relay ? L"同期改善: ON（クリックで停止）" : L"同期改善: OFF（クリックで開始）");
-    if (!up) { set(ID_TRAFFIC_TXT, L"通信量: —"); set(ID_WALK_TXT, L"解析率: —"); return; }
+    // WebMap correction = config addonPoses (use the addon's vehicle poses as a relay source)
+    const char* cf = json::find_value(o, "config");
+    bool addonOn = cf ? N(cf, "addonPoses") != 0 : false;
+    EnableWindow(H(ID_ADDON_BTN), up);
+    set(ID_ADDON_BTN, !up ? L"WebMap補正: —" : addonOn ? L"WebMap補正: ON（クリックで停止）" : L"WebMap補正: OFF（クリックで開始）");
+    if (!up) { set(ID_TRAFFIC_TXT, L"通信量: —"); set(ID_WALK_TXT, L"解析率: —"); set(ID_ADDON_TXT, L"アドオン: —"); return; }
     const char* walk = json::find_value(o, "walk"); const char* inj = json::find_value(o, "inject");
     double t8 = walk ? N(walk, "type8") : 0, full = walk ? N(walk, "full") : 0;
     set(ID_TRAFFIC_TXT, fmtw(L"通信量: ゲーム本来 %s/s  +  同期追加 %s/s   （追加合計 %s, 追記 %.0f / 書換 %.0f レコード）",
@@ -270,6 +275,26 @@ static void render_status() {
         inj ? N(inj, "appended") : 0, inj ? N(inj, "rewritten") : 0));
     set(ID_WALK_TXT, fmtw(L"解析率: %.2f%%  (%.0f / %.0f パケット解析成功、失敗 %.0f、ダンプ %.0f)   プレイヤー %.0f   車両 %.0f",
         t8 ? 100.0 * full / t8 : 0, full, t8, t8 - full, walk ? N(walk, "dumped") : 0, N(o, "peerCount"), N(o, "vehicleCount")));
+    // addon pose source (WebMap addon → WebMapBridge → addon.poses): rates from the cumulative counters
+    const char* ad = json::find_value(o, "addon");
+    static double prevMs = 0, prevBatches = 0, prevFed = 0, rateBatches = 0, rateFed = 0;
+    double now = (double)GetTickCount64(), batches = ad ? N(ad, "batches") : 0, fed = ad ? N(ad, "fed") : 0;
+    if (prevMs > 0 && now - prevMs >= 900 && batches >= prevBatches) {
+        double dt = (now - prevMs) / 1000.0;
+        rateBatches = (batches - prevBatches) / dt; rateFed = (fed - prevFed) / dt;
+        prevMs = now; prevBatches = batches; prevFed = fed;
+    } else if (prevMs == 0 || batches < prevBatches) { prevMs = now; prevBatches = batches; prevFed = fed; }
+    if (!ad || batches == 0) {
+        set(ID_ADDON_TXT, L"アドオン: 未受信（WebMapBridge から届いていません）");
+    } else {
+        std::string src = Sx(ad, "source");
+        const wchar_t* how = src == "arrival" ? L"到着で推定"
+                           : src == "matched" ? L"位置で確認済み"
+                           : src == "matched-override" ? L"位置で上書き" : L"推定中";
+        std::wstring k = B(ad, "offsetKnown") ? fmtw(L"%.0f", N(ad, "offset")) : std::wstring(L"未確定");
+        set(ID_ADDON_TXT, fmtw(L"アドオン: tick補正 %s（%s）  受信 %.1f回/s  使用 %.0f台/s  一致 %.0f票",
+            k.c_str(), how, rateBatches, rateFed, N(ad, "votes")));
+    }
 }
 
 // Freeze detector verdict for one peers[] entry (freeze{} object, see ipc-protocol.md). Short form for
@@ -479,6 +504,8 @@ static void build_ui() {
     SendMessageW(rb, WM_SETFONT, (WPARAM)g_fontBig, TRUE);
     mk(L"STATIC", L"", 0, X + 316, Y + 2, WID - 316, 18, ID_TRAFFIC_TXT, 0);
     mk(L"STATIC", L"", 0, X + 316, Y + 22, WID - 316, 18, ID_WALK_TXT, 0);
+    mk(L"STATIC", L"", 0, X + 410, Y + 44, WID - 410, 18, ID_ADDON_TXT, 0);
+    mk(L"BUTTON", L"", WS_TABSTOP | BS_PUSHBUTTON, X + 410, Y + 62, 260, 22, ID_ADDON_BTN, 0);
     mk(L"STATIC", L"参加プレイヤー", 0, X, Y + 66, 400, 18, ID_PEERS_LBL, 0);
     HWND pl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 86, WID, 176, ID_PEERS_LV, 0, WS_EX_CLIENTEDGE);
     lv_cols(pl, { {L"名前", 110}, {L"SteamID", 125}, {L"状態", 50}, {L"遅延(申告)", 70}, {L"tick差", 50}, {L"TPS", 40},{L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40},{L"最終通信", 60}, {L"凍結検知", 110} });
@@ -558,6 +585,11 @@ static void on_command(int id) {
         if (r == injector::Failed) MessageBoxW(g_wnd, (L"注入に失敗しました:\n" + W(err)).c_str(), L"SWMultiSync", MB_ICONERROR);
         poll(); break; }
     case ID_RELAY_BTN: ipc("relay.set", g_relay ? "\"enabled\":false" : "\"enabled\":true"); poll(); break;
+    case ID_ADDON_BTN: {   // WebMap correction on/off (config addonPoses, live; persisted only by "iniに保存")
+        const char* cf = json::find_value(g_status.c_str(), "config");
+        bool on = cf ? N(cf, "addonPoses") != 0 : false;
+        cfg_set("addonPoses", on ? 0 : 1); poll(); break;
+    }
     case ID_VEH_CHK: g_showVeh = IsDlgButtonChecked(g_wnd, ID_VEH_CHK) == BST_CHECKED; g_vehJson.clear(); poll(); break;
     case ID_CFG_APPLY: {
         wchar_t name[64], val[64]; GetWindowTextW(H(ID_CFG_NAME), name, 64); GetWindowTextW(H(ID_CFG_EDIT), val, 64);

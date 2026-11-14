@@ -19,6 +19,7 @@
 #include <string>
 #include <cmath>
 #include <map>
+#include <set>
 #include <array>
 #include <vector>
 #include <algorithm>
@@ -73,6 +74,8 @@ struct Cfg {
     // client-freeze detector (freeze.h): thresholds in ms, 0 disables that signal
     int    freezePoseMs = 2000;   // pose static this long while the seated vehicle moves on the server
     int    freezeDefMs  = 3000;   // a pushed vehicle definition unacknowledged (no 0x29) this long
+    // addon pose source (addon.h): body0 poses of every vehicle from the Stormworks addon over IPC
+    int    addonPoses   = 1;      // 1 = use addon.poses samples as a relay source (once the tick offset is known)
 };
 inline Cfg g_cfg;
 
@@ -109,6 +112,7 @@ inline const CfgField kCfgFields[] = {
     {"dumpWalkFailMax", true,  &Cfg::dumpWalkFailMax, nullptr, false, "max walk-fail frames per session"},
     {"freezePoseMs",    true,  &Cfg::freezePoseMs,    nullptr, false, "freeze detector: pose static this long while its vehicle moves (ms, 0 = off)"},
     {"freezeDefMs",     true,  &Cfg::freezeDefMs,     nullptr, false, "freeze detector: pushed vehicle definition unacked this long (ms, 0 = off)"},
+    {"addonPoses",      true,  &Cfg::addonPoses,      nullptr, false, "1 = use vehicle poses sent by the addon (IPC addon.poses) as a relay source"},
 };
 constexpr int kCfgFieldCount = (int)(sizeof(kCfgFields) / sizeof(kCfgFields[0]));
 
@@ -147,6 +151,7 @@ inline bool set_cfg(const char* k, double v) {
     if (g_cfg.log) g_cfg.log = 1;
     if (g_cfg.dumpWalkFail) g_cfg.dumpWalkFail = 1;
     if (g_cfg.dumpWalkFailMax < 0) g_cfg.dumpWalkFailMax = 0;
+    if (g_cfg.addonPoses) g_cfg.addonPoses = 1;
     return true;
 }
 
@@ -238,6 +243,7 @@ struct Veh {
     float cq[4] = {0,0,0,0};                      // freshest body0 rotation quaternion (raw order)
     float pq[4] = {0,0,0,0};                      // previous body0 rotation quaternion
     double srcGap = 0;                            // EMA of ticks between fresh samples (I_src); 0 = unknown
+    uint32_t addonT = 0;                          // world tick of the last addon sample (0 = none)
     int len = 0;                                  // template record length
     uint8_t bytes[kMaxRecLen];                    // latest full 0x81 record (template)
 };
@@ -259,6 +265,97 @@ inline std::map<uint64_t, uint32_t> g_peerProc;                    // per-recipi
 inline std::map<uint64_t, uint32_t> g_peerWin;                     // per-recipient budget window index
 inline std::map<uint64_t, long>     g_peerBytes;                   // per-recipient bytes used this window
 inline uint64_t g_injRecords = 0, g_injBytes = 0, g_injSends = 0, g_rewrites = 0;
+// While the addon feeds a vehicle (its last addon sample is at most this many ticks older than a native
+// one), native 0x81 only refresh the record template: mixing two sources' samples a tick apart would
+// turn their few-cm disagreement into a velocity error.
+constexpr uint32_t kAddonFreshTicks = 12;
+// Addon samples implying more than this speed (m/tick) are a jump (teleport, respawn without an unload
+// we saw): the velocity is reset instead of spanning it.
+constexpr double kAddonMaxStep = 100.0;
+// Alias (fake_missile experiment): vehicle F (a static, already-burning plume) is shown to every client
+// exactly where vehicle T is shown. Set by the addon (addon.poses "al" = [[F, T], ...]). In each message
+// to a recipient, whenever T's 0x81 goes out (native, rewritten or appended), F's body0 pose and ETA
+// are copied from it; F's own native records are overwritten with the last mirrored promise so the
+// client never glides F back to its real (parked) position while the alias holds.
+// Snap: the client glides a vehicle from where it is shown to each new promise, so F would visibly fly
+// from its parking spot to T (and back when the alias ends). The first F record of a new alias, and F's
+// first native record after the alias ends, get ETA = now so the client jumps instead of gliding.
+// F is placed kAliasBack m behind T along T's direction of travel (from T's previous promised position), so
+// the plume trails the missile instead of covering it.
+constexpr double kAliasBack = 5.0;
+struct Mirror { bool has = false, snapped = false, hasDir = false; uint32_t eta = 0, sentEta = 0; float q[4] = {0,0,0,1};
+                double p[3] = {0,0,0}, dir[3] = {0,0,0}; };
+inline std::vector<std::pair<uint32_t, uint32_t>> g_alias;                // (F, T)
+inline std::map<std::pair<uint64_t, uint32_t>, Mirror> g_mirror;          // (peer, F) -> last mirrored promise
+inline std::set<std::pair<uint64_t, uint32_t>> g_releaseSnap;             // (peer, F) whose alias ended: snap back
+inline uint64_t g_aliasRecords = 0;                                       // F records written (rewritten + appended)
+inline uint64_t g_aliasSnaps = 0;                                         // records given ETA = now
+// Latest promise of every vehicle as last sent to each peer (kept while fakes exist). A new alias used to
+// wait for T's next record in a message to that peer before F could be shown at T (2-40 ticks measured,
+// longer for vehicles the server updates rarely); seeding the mirror from here jumps F in the next send.
+struct LastPromise { uint32_t eta = 0; float q[4] = {0,0,0,1}; double p[3] = {0,0,0}; };
+inline std::map<std::pair<uint64_t, uint32_t>, LastPromise> g_lastPromise;
+constexpr size_t kLastPromiseMax = 8192;                                  // runaway guard (ids churn)
+inline uint64_t g_aliasCacheStarts = 0;                                   // aliases started from g_lastPromise
+// Standby (addon.poses "fk" = all fakes): a fake with no alias is shown to every client kStandbyDrop m
+// below its real pose (hidden underground / underwater). The first standby record per (peer, F) — and
+// again after each alias ends — gets ETA = now; when its native record is absent it is appended from the
+// template. Hidden 500 m down, the jump to T on a new alias is far enough that the glide is not seen near
+// the parking spot.
+constexpr double kStandbyDrop = 500.0;
+inline std::set<uint32_t> g_standby;                                      // all fakes
+inline std::set<std::pair<uint64_t, uint32_t>> g_standbySent;             // (peer, F) already shown in standby
+inline uint64_t g_standbyRecords = 0;
+inline void set_standby(const std::set<uint32_t>& s) {
+    for (auto it = g_standbySent.begin(); it != g_standbySent.end();)
+        if (!s.count(it->second)) it = g_standbySent.erase(it); else ++it;
+    if (s.empty()) g_lastPromise.clear();                                   // fakes gone: nothing to seed
+    g_standby = s;
+}
+// Park (addon.poses "pk" = [[F, S], ...], ship standby): F is mirrored like an alias of ship S, but shown
+// kParkDrop m below S (under the sea) instead of on it. The addon parks fakes under ships that carry
+// missiles; when one is launched the addon moves F's alias from S to the missile, which is close by, so the
+// jump happens without the long trip from the parking spot. addon.h merges pk into g_alias; g_park marks
+// which entries are parks.
+constexpr double kParkDrop = 300.0;
+inline std::set<uint32_t> g_park;                                         // fakes whose alias is a park
+inline uint64_t g_parkRecords = 0;
+inline bool is_aliased(uint32_t f) { for (auto& x : g_alias) if (x.first == f) return true; return false; }
+inline void set_alias(const std::vector<std::pair<uint32_t, uint32_t>>& a) {
+    // a target change starts a fresh mirror (the old one belongs to the previous target)
+    for (auto it = g_mirror.begin(); it != g_mirror.end();) {
+        bool keep = false, stillAliased = false;
+        for (auto& x : a) if (x.first == it->first.second) {
+            stillAliased = true;
+            for (auto& y : g_alias) if (y.first == x.first && y.second == x.second) keep = true;
+        }
+        if (keep) { ++it; continue; }
+        // F no longer aliased and the client was shown it at T: snap it back to its real pose
+        // (a standby fake instead goes back to standby: forget it was shown there so it is re-sent)
+        if (!stillAliased && it->second.sentEta != 0) {
+            if (g_standby.count(it->first.second)) g_standbySent.erase(it->first);
+            else g_releaseSnap.insert(it->first);
+        }
+        it = g_mirror.erase(it);
+    }
+    // F aliased again before its release snap went out: the new alias snaps it instead
+    for (auto it = g_releaseSnap.begin(); it != g_releaseSnap.end();) {
+        bool again = false;
+        for (auto& x : a) if (x.first == it->second) again = true;
+        if (again) it = g_releaseSnap.erase(it); else ++it;
+    }
+    g_alias = a;
+}
+
+// Debug orbit (IPC debug.orbit, experiments only, off by default): show vehicle `veh` to every client
+// circling (cx, cy, cz) at radius r, one turn per `period` ticks, by rewriting / appending its 0x81
+// with a pose on the circle. Used to check whether a static vehicle can be moved by records alone.
+struct Orbit { bool on = false; uint32_t veh = 0; double cx = 0, cy = 0, cz = 0, r = 20, period = 300; };
+inline Orbit g_orbit;
+inline uint64_t g_orbitRecords = 0;
+
+// Called for every native body0 sample (addon.h uses it to find the addon's tick offset). May be null.
+inline void (*g_onNative)(uint32_t veh, uint32_t tick, double x, double y, double z) = nullptr;
 
 inline double D(const uint8_t* p) { double v; memcpy(&v, p, 8); return v; }
 inline void   W(uint8_t* p, double v) { memcpy(p, &v, 8); }
@@ -317,7 +414,13 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
             if (tick >= sn.srcT) { sn.srcT = tick; sn.eta = eta; sn.at = tick; }
             if (off + 14 < blen && body[off + 14] == 1 && L <= kMaxRecLen && off + 31 + 24 <= blen) {
                 Veh& v = g_veh[V];
-                if (!v.has || tick > v.curT) {
+                if (g_onNative) g_onNative(V, tick, D(body + off + 31), D(body + off + 39), D(body + off + 47));
+                bool addonFeeds = g_cfg.addonPoses && v.addonT != 0 && tick <= v.addonT + kAddonFreshTicks;
+                if (addonFeeds || (v.has && tick <= v.curT)) {
+                    // pose comes from the other source (or is not newer): keep only the template fresh
+                    // (non-root bodies, flags); fill_pose rewrites body0 before anything is sent.
+                    v.len = L; memcpy(v.bytes, body + off, L);
+                } else if (!v.has || tick > v.curT) {
                     if (v.has && tick > v.curT) {
                         double dt = (double)(tick - v.curT);
                         v.srcGap = v.srcGap > 0 ? v.srcGap + (dt - v.srcGap) * kSrcEmaAlpha : dt;
@@ -332,6 +435,38 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
             }
         }
         off += L;
+    }
+}
+
+// One body0 sample from the addon (addon.h, already mapped to the world tick). Same bookkeeping as a
+// native sample but without a record template: a vehicle no native feed has carried yet is tracked
+// (velocity, I_src) and becomes appendable once a native 0x81 supplies the template.
+inline void observe_addon(uint32_t V, uint32_t tick, double x, double y, double z, const float q[4]) {
+    Veh& v = g_veh[V];
+    if (v.has && tick <= v.curT) return;                       // native (or an earlier batch) is as fresh
+    if (v.has) {
+        double dt = (double)(tick - v.curT);
+        double dx = x - v.cx, dy = y - v.cy, dz = z - v.cz;
+        if (std::sqrt(dx * dx + dy * dy + dz * dz) > kAddonMaxStep * dt) {
+            v.prevT = 0; v.srcGap = 0;                          // jump: no velocity across it
+        } else {
+            v.srcGap = v.srcGap > 0 ? v.srcGap + (dt - v.srcGap) * kSrcEmaAlpha : dt;
+            v.prevT = v.curT; v.px = v.cx; v.py = v.cy; v.pz = v.cz;
+            memcpy(v.pq, v.cq, sizeof(v.cq));
+        }
+    }
+    v.curT = tick; v.addonT = tick;
+    v.cx = x; v.cy = y; v.cz = z;
+    for (int i = 0; i < 4; i++) v.cq[i] = q[i];
+    v.has = true;
+}
+
+// Drop addon-only vehicles (never got a native template) whose last sample is older than `stale`.
+inline void prune_addon_only(uint32_t nowTick) {
+    for (auto it = g_veh.begin(); it != g_veh.end();) {
+        const Veh& v = it->second;
+        if (v.len <= 0 && v.addonT != 0 && nowTick > v.curT + (uint32_t)g_cfg.stale) it = g_veh.erase(it);
+        else ++it;
     }
 }
 
@@ -473,7 +608,9 @@ inline bool budget_ok(uint64_t peer, uint32_t tick, int addLen) {
 // sample exists than the one B's last promise was built from, or that promise is about to expire
 // (dead-reckon on the old sample). Patches total (+4) and recordCount (body+16). Returns the new
 // cub if ANYTHING changed, else 0.
-inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* out, int outcap, uint32_t tick) {
+inline int alias_pass(uint64_t peer, uint8_t* out, int& wpos, int outcap, int recCount, uint32_t tick, int& added, int& addedBytes);
+inline int orbit_pass(uint8_t* out, int& wpos, int outcap, int recCount, uint32_t tick, int& added, int& addedBytes);
+inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* out, int outcap, uint32_t tick, bool relayOn = true) {
     // Rewound-world-tick guard: never modify a message whose world tick is not newer than the last
     // one we injected into for this recipient. A server rewind / resend of an older tick must pass
     // through untouched so we don't stamp future-predicted poses onto a replayed past frame (which
@@ -493,7 +630,7 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
     // by kNativeHorizon for a coarse-only source), so even vehicles below relayMinGap — or a solo player's
     // own far vehicle — render closer to Λ behind instead of a full native interval behind.
     int rewrote = 0, count = (int)rec::U32(body, blen, 16), off = 20;
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; relayOn && i < count; i++) {
         if (off >= blen) break;
         uint32_t tag = rec::U32(body, blen, off);
         int L = rec::decode_len(body, blen, off);
@@ -529,6 +666,7 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
     // (smallest native gap = highest relevance) so the per-recipient budget favours close vehicles.
     std::vector<std::pair<uint32_t, uint32_t>> cand;                     // (gap, veh)
     for (auto& kv : g_veh) {
+        if (!relayOn) break;
         uint32_t V = kv.first; const Veh& v = kv.second;
         if (handled.count(V) || !v.has || v.len <= 0) continue;
         if (!managed(peer, V, tick)) continue;
@@ -560,13 +698,169 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
         g_sent[std::make_pair(peer, V)] = Sent{ v.curT, eta, tick };
     }
 
-    if (rewrote == 0 && added == 0) return 0;
+    int aliased = (g_alias.empty() && g_releaseSnap.empty() && g_standby.empty()) ? 0 : alias_pass(peer, out, wpos, outcap, count + added, tick, added, addedBytes);
+    if (g_orbit.on) aliased += orbit_pass(out, wpos, outcap, count + added, tick, added, addedBytes);
+    if (rewrote == 0 && added == 0 && aliased == 0) return 0;
     if (added > 0) {
         uint32_t total; memcpy(&total, out + 4, 4); total += addedBytes; memcpy(out + 4, &total, 4);
         uint32_t rc;    memcpy(&rc, out + 24, 4);   rc += added;          memcpy(out + 24, &rc, 4);
     }
     g_injRecords += added; g_injBytes += addedBytes; g_rewrites += rewrote; g_injSends++;
     return cub + addedBytes;
+}
+
+// Mirror T's promise onto F in this message (see g_alias). Walks the first recCount records of the copy
+// (native + those pass 2 appended), then rewrites F's records or appends one from F's template. Returns
+// how many F records were written; `added` / `addedBytes` grow by the appended ones.
+inline int alias_pass(uint64_t peer, uint8_t* out, int& wpos, int outcap, int recCount, uint32_t tick, int& added, int& addedBytes) {
+    uint8_t* body = out + 8; int blen = wpos - 8;
+    int written = 0;
+    // alias ended: F's own native record in this message jumps (ETA = now) back to its real pose
+    if (!g_releaseSnap.empty()) {
+        for (int i = 0, off = 20; i < recCount && off < blen; i++) {
+            int L = rec::decode_len(body, blen, off);
+            if (L <= 0) break;
+            if (rec::U32(body, blen, off) == 0x81 && off + 12 <= blen && body[off + 14] == 1) {
+                auto key = std::make_pair(peer, rec::U32(body, blen, off + 4));
+                if (g_releaseSnap.count(key)) { memcpy(body + off + 8, &tick, 4); g_releaseSnap.erase(key); g_aliasSnaps++; }
+            }
+            off += L;
+        }
+    }
+    // standby: every un-aliased fake is shown kStandbyDrop m below its real pose
+    if (!g_standby.empty()) {
+        std::set<uint32_t> seen;
+        auto drop = [&](uint8_t* r, uint32_t V) {
+            W(r + 39, D(r + 39) - kStandbyDrop);
+            auto key = std::make_pair(peer, V);
+            if (!g_standbySent.count(key)) { memcpy(r + 8, &tick, 4); g_standbySent.insert(key); g_aliasSnaps++; }
+            g_standbyRecords++; written++;
+        };
+        for (int i = 0, off = 20; i < recCount && off < blen; i++) {
+            int L = rec::decode_len(body, blen, off);
+            if (L <= 0) break;
+            if (rec::U32(body, blen, off) == 0x81 && off + 31 + 24 <= blen && body[off + 14] == 1) {
+                uint32_t V = rec::U32(body, blen, off + 4);
+                if (g_standby.count(V) && !is_aliased(V)) { drop(body + off, V); seen.insert(V); }
+            }
+            off += L;
+        }
+        for (uint32_t V : g_standby) {
+            if (seen.count(V) || is_aliased(V) || g_standbySent.count(std::make_pair(peer, V))) continue;
+            auto vit = g_veh.find(V);
+            if (vit == g_veh.end() || vit->second.len <= 0) continue;               // no template yet
+            const Veh& vf = vit->second;
+            if (vf.bytes[14] != 1 || vf.len < 31 + 24 || wpos + vf.len > outcap || added >= kMaxPerSend) continue;
+            memcpy(out + wpos, vf.bytes, vf.len);
+            drop(out + wpos, V);
+            wpos += vf.len; addedBytes += vf.len; added++;
+            blen = wpos - 8;
+        }
+    }
+    // remember every vehicle's latest promise to this peer (see g_lastPromise)
+    if (!g_standby.empty() || !g_alias.empty()) {
+        if (g_lastPromise.size() > kLastPromiseMax) g_lastPromise.clear();
+        for (int i = 0, off = 20; i < recCount && off < blen; i++) {
+            int L = rec::decode_len(body, blen, off);
+            if (L <= 0) break;
+            if (rec::U32(body, blen, off) == 0x81 && off + 31 + 24 <= blen && body[off + 14] == 1) {
+                LastPromise& c = g_lastPromise[std::make_pair(peer, rec::U32(body, blen, off + 4))];
+                memcpy(&c.eta, body + off + 8, 4);
+                for (int q = 0; q < 4; q++) c.q[q] = F(body + off + 15 + q * 4);
+                c.p[0] = D(body + off + 31); c.p[1] = D(body + off + 39); c.p[2] = D(body + off + 47);
+            }
+            off += L;
+        }
+    }
+    for (auto& al : g_alias) {
+        uint32_t fid = al.first, tid = al.second;
+        if (fid == tid) continue;
+        const bool park = g_park.count(fid) != 0;
+        Mirror& m = g_mirror[std::make_pair(peer, fid)];
+        int offF = -1;
+        for (int i = 0, off = 20; i < recCount && off < blen; i++) {
+            int L = rec::decode_len(body, blen, off);
+            if (L <= 0) break;
+            if (rec::U32(body, blen, off) == 0x81 && off + 31 + 24 <= blen && body[off + 14] == 1) {
+                uint32_t V = rec::U32(body, blen, off + 4);
+                if (V == tid) {                                                 // T's promise in this message
+                    double np[3] = { D(body + off + 31), D(body + off + 39), D(body + off + 47) };
+                    if (m.has) {                                                // direction of travel
+                        double d[3] = { np[0] - m.p[0], np[1] - m.p[1], np[2] - m.p[2] };
+                        double n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                        if (n > 0.05) { for (int k = 0; k < 3; k++) m.dir[k] = d[k] / n; m.hasDir = true; }
+                    }
+                    m.has = true; memcpy(&m.eta, body + off + 8, 4);
+                    for (int q = 0; q < 4; q++) m.q[q] = F(body + off + 15 + q * 4);
+                    m.p[0] = np[0]; m.p[1] = np[1]; m.p[2] = np[2];
+                } else if (V == fid) offF = off;
+            }
+            off += L;
+        }
+        if (!m.has) {
+            // T not in this message: start from T's last promise to this peer, if it was ever sent one
+            auto c = g_lastPromise.find(std::make_pair(peer, tid));
+            if (c == g_lastPromise.end()) continue;                             // T not seen by this peer yet
+            m.has = true; m.eta = c->second.eta;
+            for (int q = 0; q < 4; q++) m.q[q] = c->second.q[q];
+            for (int k = 0; k < 3; k++) m.p[k] = c->second.p[k];
+            g_aliasCacheStarts++;
+        }
+        auto put = [&](uint8_t* r) {
+            // first record of this alias for this peer: jump to T now instead of gliding from the parking spot
+            if (!m.snapped) { memcpy(r + 8, &tick, 4); m.snapped = true; g_aliasSnaps++; }
+            else memcpy(r + 8, &m.eta, 4);
+            for (int q = 0; q < 4; q++) WF(r + 15 + q * 4, m.q[q]);
+            if (park) { W(r + 31, m.p[0]); W(r + 39, m.p[1] - kParkDrop); W(r + 47, m.p[2]); g_parkRecords++; return; }
+            double back = m.hasDir ? kAliasBack : 0.0;
+            W(r + 31, m.p[0] - m.dir[0] * back); W(r + 39, m.p[1] - m.dir[1] * back); W(r + 47, m.p[2] - m.dir[2] * back);
+        };
+        if (offF >= 0) { put(body + offF); m.sentEta = m.eta; written++; continue; }
+        // F not in this message: append it from its template, but only when T's promise changed since F
+        // was last given one (otherwise F already holds the same promise on the client)
+        if (m.sentEta == m.eta) continue;
+        auto vit = g_veh.find(fid);
+        if (vit == g_veh.end() || vit->second.len <= 0) continue;               // no template yet
+        const Veh& vf = vit->second;
+        if (vf.bytes[14] != 1 || vf.len < 31 + 24 || wpos + vf.len > outcap || added >= kMaxPerSend) continue;
+        memcpy(out + wpos, vf.bytes, vf.len);
+        put(out + wpos);
+        wpos += vf.len; addedBytes += vf.len; added++; written++;
+        m.sentEta = m.eta;
+    }
+    g_aliasRecords += written;
+    return written;
+}
+
+// debug.orbit: every message to every peer carries `veh` at its circle position at ETA = tick + 4 (the
+// client glides there, so it moves continuously). Rewrites veh's own record if present, else appends one
+// from its template. Returns the number of records written.
+inline int orbit_pass(uint8_t* out, int& wpos, int outcap, int recCount, uint32_t tick, int& added, int& addedBytes) {
+    uint8_t* body = out + 8; int blen = wpos - 8;
+    uint32_t eta = tick + 4;
+    double a = 2.0 * 3.14159265358979 * std::fmod((double)eta, g_orbit.period) / g_orbit.period;
+    double px = g_orbit.cx + g_orbit.r * std::cos(a), py = g_orbit.cy, pz = g_orbit.cz + g_orbit.r * std::sin(a);
+    auto put = [&](uint8_t* r) {
+        memcpy(r + 8, &eta, 4);
+        WF(r + 15, 0); WF(r + 19, 0); WF(r + 23, 0); WF(r + 27, 1);   // identity rotation
+        W(r + 31, px); W(r + 39, py); W(r + 47, pz);
+    };
+    for (int i = 0, off = 20; i < recCount && off < blen; i++) {
+        int L = rec::decode_len(body, blen, off);
+        if (L <= 0) break;
+        if (rec::U32(body, blen, off) == 0x81 && rec::U32(body, blen, off + 4) == g_orbit.veh
+            && off + 31 + 24 <= blen && body[off + 14] == 1) { put(body + off); g_orbitRecords++; return 1; }
+        off += L;
+    }
+    auto vit = g_veh.find(g_orbit.veh);
+    if (vit == g_veh.end() || vit->second.len <= 0) return 0;                   // no template yet
+    const Veh& v = vit->second;
+    if (v.bytes[14] != 1 || v.len < 31 + 24 || wpos + v.len > outcap || added >= kMaxPerSend) return 0;
+    memcpy(out + wpos, v.bytes, v.len);
+    put(out + wpos);
+    wpos += v.len; addedBytes += v.len; added++;
+    g_orbitRecords++;
+    return 1;
 }
 
 } // namespace relay
