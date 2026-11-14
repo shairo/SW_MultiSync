@@ -136,3 +136,37 @@ Seen len **76** (payload 64, the common single form, 3333× across captures) and
 124-B header + **3 × 64-B entries**, each a body: `float[3] pos` + HP `float ≈ 100`). One entry per body;
 NPCs & objects both use it. The old fixed-76 guess mis-split the 328 form's zero tail into a phantom
 **tag 0x00** (not a real record — resolved by the variable rule).
+
+## 0x68 / 0x69 / 0x6A / 0x84 — wildlife fish  ✅ lengths fixed, meaning ✅ (matched against the save)
+Decoded 2026-11-08 from `session_20261108_045606_169` (1 peer, addon missile combat; these four were 25–33 % of
+walk failures). Lengths pinned with `swcap lens` (last-record cases) and `swcap solve`; all fixed. The same rules
+also lift the 2026-09 `--legacy` captures from 76–93 % to 99.8–100 % walked, so they are not new in the update.
+```
+0x84 (52): u32 tag · u32 uid · u32 world tick (= message tick) · f64 x,y,z · f32 quat[4] (|q| = 1)      fish pose
+0x68 (52): u32 tag · u32 fish_type · u32 0 · f64 x,y,z · f32[3] heading (x,0,z) · f32 scale (1.0)        fish spawn
+0x6A (38): u32 tag · u32 uid · f32[3] (0 in all samples) · f32[3] target_heading (x,0,z) · u16 0 ·
+           u16 jump_timer (180) · u16 out_of_water_timer (2000)                                        fish state
+0x69  (8): u32 tag · u32 uid                                                                             fish remove
+```
+Meaning (2026-11-14). The save keeps the same objects as `<wildlife fish_uid="N"><fish><f fish_type uid
+state_ticks jump_timer out_of_water_timer scale [turn_factor]><transform/><target_heading x z/><flee_heading/></f>`
+(`working_server/scene.xml`: 24 fish, uids 813..867, next uid 868). Against the capture:
+
+| capture | save `<f>` |
+|---|---|
+| ids 789..834, ~30 at a time, consecutive new ids (833, 834) | uids 813..867, `fish_uid` = next uid counter |
+| x 13950..14150, z −25860..−26070, y −3..−9 (mostly −5.0) | same area, y −4.95..−5.08 |
+| 0x84 moves 15–68 m per ~3400 ticks (0.3–1 m/s) | — (fish swim slowly) |
+| 0x6A unit vector, y = 0, constant per uid; equals the direction 0x84 moves (uid 827: (0,0,1) and +68 m in z; uid 808: (−0.84,0,−0.55) vs moved (−13,−9)) | `target_heading x z` |
+| 0x6A u16 180 / 2000 in every sample | `jump_timer="180" out_of_water_timer="2000"` on all 24 fish |
+| 0x68 first u32 = 15, 37 | `fish_type` values 2..42 include 15 and 37 |
+| 0x68 last f32 = 1.0; f32[3] before it = (−0.9987, −0, 0.0515), horizontal unit | `scale="1"`; initial heading |
+
+- Spawn/remove keep the count: `0x69 uid 815` (tick 32299) → `0x68 fish_type 15 @ (14125,−3,−25987)` (32300) →
+  first `0x84 uid 833` at the same position (32301); again `0x69 821` → `0x68 type 37` → `0x84 uid 834`. 0x68 carries
+  no uid; the new uid appears in the next 0x84.
+- 0x84 spacing is a distance LOD like 0x81's: uids 808/827 every ~11 ticks, the rest 260–1370. 0x6A every 24 ticks.
+- The two misses: the capture (11-08 04:56) and the save (11-14) are different sessions, so values are not compared
+  uid by uid; the first f32[3] of 0x6A (always 0) and its u16 0 are unknown (flee_heading / turn_factor?).
+  `hebi3_mm_1108` (saved 11-08 23:36) has no fish.
+- Still unknown on the legacy captures (< 0.2 % of messages): 0x6B, 0x6C, 0x82, 0x56 — maybe more wildlife.
