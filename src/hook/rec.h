@@ -253,7 +253,8 @@ inline int decode_client_len(const uint8_t* b, int len, int off) {
         case 0x2D: L = 8;  break;   // EMOTE: tag + u32 emote 0..8, ~35 in a row per emote; server echoes 0x5F
         case 0x35: L = 50; break;
         case 0x44: L = 5;  break;   // tag + u8, runs; u8 1 precedes a 0x51 (server 0x21)
-        case 0x4E: L = 174; break;  // item payload + double matrix + pos; one sample only (CANDIDATE)
+        case 0x4E: L = 174; break;  // DROP equipment: slot + item data + f64 matrix + pos (server: 0x4D object spawn)
+        case 0x4D: L = 60; break;   // PICK UP equipment: slot + item data + objId (server: 0x4F despawn)
         case 0x5B: L = 12; break;   // tag + u32 + u32 (server 0x99)
         case 0x02: L = 6 + (int)U16(b, len, off + 4); break;          // chat text
         case 0x0A: L = 40 + (int)U16(b, len, off + 38); break;        // component interact (name)
