@@ -35,7 +35,7 @@ Mean: ✅ decoded · △ partial · ❌ unknown.
 | 0x39 | 57 | vehicle low-frequency position sync | ✅ | ✅ | sync |
 | 0x1B | 27 | set NUMBER signal on a vehicle part (float value) | ✅ | ✅ | sync |
 | 0x1D | 29 | **object** position/physics sync (new; object's 0x1B), fixed 34, batched in runs | ✅ | △ | sync |
-| 0x84 0x68 0x6A 0x69 | 132 104 106 105 | object family (projectile-like?): 0x84 pose sync (id·tick·f64 xyz·quat, 52), 0x68 (52), 0x6A (38), 0x69 id-only (8) | ✅ | △ | sync |
+| 0x84 0x68 0x6A 0x69 | 132 104 106 105 | **wildlife fish**: 0x84 pose (uid·tick·f64 xyz·quat, 52), 0x68 spawn (fish_type·xyz·heading·scale, 52), 0x6A state (uid·target_heading·timers, 38), 0x69 remove (uid, 8) | ✅ | ✅ | sync |
 | 0x50 | 80 | NPC/object state: per-body position + HP | ✅ | ✅ | sync |
 | 0xB5 | 181 | vehicle transform/teleport (setVehiclePos): 4x4 matrix | ✅ | ✅ | sync |
 | 0x5E | 94 | PLAYER teleport (map fast-travel): double[3] pos | ✅ | ✅ | sync |
