@@ -86,6 +86,7 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x8B: L = 16; break;   // NEW in the 2026-11 update: slowly rotating vec3 (|xy|~0.07), all peers ~every 100 ticks
         case 0x21: L = 7;  break;   // tag + u16 peer_id + u8, mirror of client 0x44; u8 1 -> a 0x28 follows
         case 0x60: L = 6;  break;   // tag + u16 peer_id (with client 0x16)
+        case 0x18: L = 7;  break;   // DROP KEY: tag + u16 peer_id + u8 down/up, mirror of client 0x08
         case 0x84: L = 52; break;   // object pose: id + world tick + f64 xyz + f32 quat (sk7z-xyz 6deeafb)
         case 0x99: L = 12; break;   // tag + u32 + u32, mirror of client 0x5B
         case 0x8C: L = 8;  break;   // day length?
@@ -239,7 +240,7 @@ inline int decode_client_len(const uint8_t* b, int len, int off) {
         case 0x38: L = 13; break;   // heal request
         case 0x01: L = 73; break;   // seat-entry snapshot
         case 0x14: case 0x13: L = 12; break;   // NPC follow / pick up
-        case 0x06: L = 25; break;   // NPC put down
+        case 0x06: L = 25; break;   // grab / release: charId + objId (0 = release) + u8 + f32 grip offset
         case 0x17: L = 8 + (int)U32(b, len, off + 4); break;   // character appearance: +4 u32 = remaining len (0x6A -> 114 B; 118-B variant assumed 0x6E)
         case 0x05: L = 9;  break;   // tag + u32 vehId + u8
         case 0x21: L = 4;  break;   // bare
@@ -248,6 +249,7 @@ inline int decode_client_len(const uint8_t* b, int len, int off) {
         case 0x1B: case 0x29: case 0x15: case 0x68: L = 8; break;   // tag + u32 (vehicle load acks etc.)
         case 0x09: L = 52; break;
         case 0x16: L = 4;  break;   // bare (with server 0x60)
+        case 0x08: L = 5;  break;   // DROP KEY: tag + u8 1 = down, 0 = up -> 0x06 release (long hold = throw); server 0x18
         case 0x2D: L = 8;  break;   // EMOTE: tag + u32 emote 0..8, ~35 in a row per emote; server echoes 0x5F
         case 0x35: L = 50; break;
         case 0x44: L = 5;  break;   // tag + u8, runs; u8 1 precedes a 0x51 (server 0x21)

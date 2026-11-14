@@ -59,7 +59,8 @@ The client-side records don't carry it; the server stamps it.
 | 0x01 | 73 | seat-entry state snapshot (after 0x64 + 0x65×8 at seat enter) | tag+3 · 24 B zero · f32 yaw · f32 pitch · 37 B zero — broadcast as SEND 0x07 (71 B); also seen from self after respawn (session 8) |
 | 0x14 | 12 | **NPC follow toggle** | tag+3 · u32 playerId · u32 npcId — broadcast as SEND 0x0D (14 B) |
 | 0x13 | 12 | **NPC pick up / carry** | tag+3 · u32 playerId · u32 npcId — broadcast as SEND 0x0E (14 B) |
-| 0x06 | 25 | **NPC put down** (sent as a pair) | tag+3 · u32 playerId · 17 B zero — broadcast as SEND 0x17 (25 B) |
+| 0x06 | 25 | **grab / release object** (NPC carry too) | tag+3 · u32 charId · u32 objId (0 = release) · u8 1 · f32[3] grip offset — broadcast as SEND 0x17 (25 B). Picking up / putting down smoke-flare shells 2638 / 2637 (session_20261114_205303_756) |
+| 0x08 | 5 | **drop key**: tag+3 · u8 1 = down, 0 = up; the 0x06 release follows key-up in the same message. Tap (0.1 s) = drop, hold (2.7 s) = throw; no throw velocity is sent | broadcast as SEND 0x18 (7 B, + peer_id) (session_20261114_205303_756 / 210955_962) |
 | 0x17 | 8+u32 | **character appearance** (sent on seat exit) | tag+3 · u32 remaining len (0x6A → 114 B total) · u8 1 · 13× RGBA outfit colours · ints — echoed verbatim as SEND 0x61 (116) |
 | 0x05 | 9 | vehicle-related ack | tag+3 · u32 vehId · u8 1 (walkfail_20260919_125459) |
 | 0x21 | 4 | bare | after 0x66/0x2F (walkfail_20260919_125459) |
