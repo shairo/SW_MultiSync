@@ -202,6 +202,10 @@ public static class Records
             case 0x21: // tag + u16 peer_id + u8 (7 B), runs; mirror of client 0x44. u8 1 -> a full 0x28 (46 B) follows.
                 r.Length = 7; r.Status = off + 7 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
                 r.Note = $"peer={U16(b, off + 4)} b={(off + 6 < b.Length ? b[off + 6] : -1)}"; break;
+            case 0x9F: // RELOAD broadcast? tag + u32 charId + u32 (100) (12 B); mirror of client 0x62, followed by 0x29 slot updates.
+                       // session_20261114_212632_693 (2 reloads).
+                r.Length = 12; r.Status = off + 12 <= b.Length ? RecStatus.Ok : RecStatus.Overrun;
+                r.Note = $"char={U32(b, off + 4)} u32={U32(b, off + 8)}"; break;
             case 0x18: // DROP KEY broadcast: tag + u16 peer_id + u8 (1 = down, 0 = up) (7 B); mirror of client 0x08. The held object
                        // is released (client 0x06 objId 0) on key-up: 0.1 s tap = drop, 2.7 s hold = throw (no velocity is sent).
                        // session_20261114_205303_756 / 210955_962.

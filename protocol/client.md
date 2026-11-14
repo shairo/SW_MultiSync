@@ -70,6 +70,9 @@ The client-side records don't carry it; the server stamps it.
 | 0x44 | 5 | tag+3 · u8, runs; u8 1 is followed by a 0x51 | broadcast as SEND 0x21 (7 B) (session_20261107_231116_959) |
 | 0x4E | 174 | **drop equipment**: tag+3 · u32 slot · item data · f64 matrix · world pos | server spawns it as an object (SEND 0x4D, payload 323) + 0x26/0x28/0x29 slot updates. 6 samples (session_20261107_231116_959, 20261114_211508_692) |
 | 0x4D | 60 | **pick up equipment**: tag+3 · u32 slot · item data · u32 objId | server removes the object (SEND 0x4F) + 0x27/0x28/0x29. 5 samples (session_20261114_211508_692) |
+| 0x5E | 68 | **fire hand weapon**: tag+3 · u32 slot (4) · u32 0 · f64[3] muzzle offset from the player's 0x2F pos (~0.8 m, not absolute) · f32[3] ray end relative to the muzzle (= aim dir × 650 in every sample; range limit? unhit shots only) · f32[3] unit aim dir · u32 0 · u32 charId | one per shot, always followed by 0x52 "primary"; the server answers with 0x29 slot (ammo) updates. 42 shots (session_20261114_212632_693) |
+| 0x62 | 12 | **reload start**: tag+3 · u32 charId · u32 100 | followed by 0x52 "secondary"; broadcast as SEND 0x9F (12 B) (session_20261114_212632_693) |
+| 0x4C | 34 | **set slot item** (reload result): tag+3 · u32 charId · u32 slot · u32 item type (0 = empty) · u32 0 · u32 ammo · … | one per changed slot: gun (slot 1, type 37) gets the ammo, spare mag (slot 7, type 38) the rest or type 0 when used up; broadcast as SEND 0x26 (char, slot) (session_20261114_212632_693) |
 | 0x5B | 12 | tag+3 · u32 · u32 | broadcast as SEND 0x99 (12 B) (session_20261107_231116_959) |
 
 ### 0x0A observations

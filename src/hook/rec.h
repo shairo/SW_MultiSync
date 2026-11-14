@@ -86,6 +86,7 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x8B: L = 16; break;   // NEW in the 2026-11 update: slowly rotating vec3 (|xy|~0.07), all peers ~every 100 ticks
         case 0x21: L = 7;  break;   // tag + u16 peer_id + u8, mirror of client 0x44; u8 1 -> a 0x28 follows
         case 0x60: L = 6;  break;   // tag + u16 peer_id (with client 0x16)
+        case 0x9F: L = 12; break;   // reload broadcast: charId + u32 (100), mirror of client 0x62
         case 0x18: L = 7;  break;   // DROP KEY: tag + u16 peer_id + u8 down/up, mirror of client 0x08
         case 0x84: L = 52; break;   // object pose: id + world tick + f64 xyz + f32 quat (sk7z-xyz 6deeafb)
         case 0x99: L = 12; break;   // tag + u32 + u32, mirror of client 0x5B
@@ -254,6 +255,9 @@ inline int decode_client_len(const uint8_t* b, int len, int off) {
         case 0x35: L = 50; break;   // equipment-box swap: slot + vehId + body? + voxel + item data
         case 0x44: L = 5;  break;   // tag + u8, runs; u8 1 precedes a 0x51 (server 0x21)
         case 0x4E: L = 174; break;  // DROP equipment: slot + item data + f64 matrix + pos (server: 0x4D object spawn)
+        case 0x5E: L = 68; break;   // FIRE (hand weapon): slot + f64 muzzle offset[3] + f32 ray end[3] (dir x 650) + f32 dir[3] + charId
+        case 0x4C: L = 34; break;   // set slot item: charId + slot + item type + ammo (reload)
+        case 0x62: L = 12; break;   // reload start: charId + u32 (100); server 0x9F
         case 0x4D: L = 60; break;   // PICK UP equipment: slot + item data + objId (server: 0x4F despawn)
         case 0x5B: L = 12; break;   // tag + u32 + u32 (server 0x99)
         case 0x02: L = 6 + (int)U16(b, len, off + 4); break;          // chat text
