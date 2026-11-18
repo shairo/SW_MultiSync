@@ -363,9 +363,43 @@ static uint8_t* append_records(const uint8_t* src, uint32_t cub, const std::vect
 }
 
 // ---- hooks ----
+// Steam P2P route of one peer (direct or relayed). Called from the game's own send call (its thread),
+// at most every stats::kRouteMs per peer; SEH-guarded so a bad vtable slot cannot take the server down.
+static int32_t query_route(void* self, const SteamNetworkingIdentity* id, int32_t& outFlags) {
+    alignas(8) uint8_t info[1024];
+    alignas(8) uint8_t quick[1024];
+    memset(info, 0, sizeof info); memset(quick, 0, sizeof quick);
+    int32_t state = -1;
+    __try {
+        auto fn = reinterpret_cast<GetSessionConnectionInfo_t>((*reinterpret_cast<void***>(self))[kVT_GetSessionConnectionInfo]);
+        state = fn(self, id, info, quick);
+        memcpy(&outFlags, info + kConnInfoFlagsOff, 4);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { state = -1; }
+    return state;
+}
+static void poll_route(void* self, const SteamNetworkingIdentity* id, uint64_t sid) {
+    uint64_t now = GetTickCount64();
+    EnterCriticalSection(&g_cs);
+    auto it = stats::g_peers.find(sid);
+    bool due = it != stats::g_peers.end() && now - it->second.routeMs >= stats::kRouteMs;
+    if (due) it->second.routeMs = now;
+    LeaveCriticalSection(&g_cs);
+    if (!due) return;
+    int32_t fl = 0;
+    int32_t st = query_route(self, id, fl);
+    EnterCriticalSection(&g_cs);
+    auto jt = stats::g_peers.find(sid);
+    if (jt != stats::g_peers.end()) {
+        jt->second.connState = st;
+        jt->second.relayed = st == kConnState_Connected ? ((fl & kConnFlag_Relayed) ? 1 : 0) : -1;
+    }
+    LeaveCriticalSection(&g_cs);
+}
+
 static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
                            const void* data, uint32_t cub, int32_t flags, int32_t ch) {
     InFlight guard;
+    if (id && id->m_eType == 16) poll_route(self, id, peer_id(id));
     const uint8_t* b = static_cast<const uint8_t*>(data);
     bool head = cub >= 28 && *reinterpret_cast<const uint32_t*>(b) == 0;   // frag==0 (single-frame head)
     const uint8_t* body = b + 8; int blen = (int)cub - 8;
@@ -656,7 +690,8 @@ static void write_peers(json::JsonW& w) {
          .kv("injSends", p.injSends).kv("injBytes", p.injBytes).kv("injRecords", p.injRecords)
          .kv("type8", p.type8).kv("walkFull", p.walkFull).kv("walkPartial", p.walkPartial)
          .kv("vehicles", vehs)
-         .kv("type3", p.type3).kv("rwalkFull", p.rwalkFull).kv("rwalkPartial", p.rwalkPartial);
+         .kv("type3", p.type3).kv("rwalkFull", p.rwalkFull).kv("rwalkPartial", p.rwalkPartial)
+         .kv("route", p.relayed == 1 ? "relay" : p.relayed == 0 ? "direct" : "unknown").kv("connState", p.connState);
         if (p.hbMs) w.key("sync").obj().kv("clientTick", p.cliTick).kv("clientTps", p.cliTps)
                        .kv("framesBehind", p.cliBehind).kv("tickLag", p.tickLag).kv("hbMs", p.hbMs).end();
         if (p.posMs) w.key("pos").arr().num(p.px).num(p.py).num(p.pz).end().kv("posMs", p.posMs);
@@ -684,12 +719,23 @@ static void write_vehicles(json::JsonW& w) {
          .key("rot").arr().num((double)v.cq[0]).num((double)v.cq[1]).num((double)v.cq[2]).num((double)v.cq[3]).end()
          .kv("srcGap", v.srcGap);   // I_src: EMA of ticks between fresh samples (0 = unknown)
         if (v.addonT) w.kv("addonTick", (unsigned)v.addonT);   // last addon.poses sample (world tick)
+        // where the held pose came from: "addon" (WebMap addon.poses) or "native" (server 0x81);
+        // template = a native record exists, so the vehicle can be appended to clients
+        w.kv("src", (v.addonT != 0 && v.curT == v.addonT) ? "addon" : "native").kv("template", v.len > 0);
+        // fake_missile role: alias (on a missile), park (under a ship), standby (500 m below its pose)
+        uint32_t fid = kv.first;
+        if (relay::is_aliased(fid)) {
+            uint32_t tid = 0; for (auto& x : relay::g_alias) if (x.first == fid) tid = x.second;
+            w.kv("fake", relay::g_park.count(fid) ? "park" : "alias").kv("fakeTarget", (unsigned)tid);
+        } else if (relay::g_standby.count(fid)) w.kv("fake", "standby");
         auto grp = relay::g_group.find(kv.first);
         if (grp != relay::g_group.end()) w.kv("group", (unsigned)grp->second);   // absent: spawned before we hooked
         // which recipients see this vehicle, and how coarsely (native gap in ticks = distance proxy)
         w.key("feeds").arr();
         for (auto& g : relay::g_natGap) if (g.first.second == kv.first)
-            w.obj().kv("steamId", g.first.first).kv("gap", (unsigned)g.second).end();
+            w.obj().kv("steamId", g.first.first).kv("gap", (unsigned)g.second)
+             .kv("mode", relay::feed_mode(g.first.first, kv.first, g_relay))
+             .kv("every", (unsigned)(g_relay ? relay::feed_every(g.first.first, kv.first) : g.second)).end();
         w.end();
         w.end();
     }

@@ -97,7 +97,7 @@ static std::map<std::string, PeerSample> g_prev; static double g_prevMs = 0;
 static void print_peers(const std::string& r, bool rates) {
     const char* o = r.c_str();
     double now = N(o, "nowMs"); double dt = (g_prevMs && now > g_prevMs) ? (now - g_prevMs) / 1000.0 : 0;
-    printf("%-18s %-5s %9s %9s %9s %7s %7s %5s %6s %-8s %6s %4s %-26s %-8s %-20s %s\n", "steamId", "conn", rates ? "send/s" : "sent",
+    printf("%-18s %-5s %-7s %9s %9s %9s %7s %7s %5s %6s %-8s %6s %4s %-26s %-8s %-20s %s\n", "steamId", "conn", "route", rates ? "send/s" : "sent",
            rates ? "extra/s" : "extra", rates ? "recv/s" : "recv", "walk%", "rwalk%", "vehs", "type8", "behind", "lag", "tps", "pos (x y z)", "last", "freeze", "name");
     json::for_each_elem(json::find_value(o, "peers"), [&](const char* p) {
         std::string id = ID(p, "steamId");
@@ -125,7 +125,9 @@ static void print_peers(const std::string& r, bool rates) {
             if (since > 0) snprintf(frz, sizeof frz, "FROZEN %s %.0fs", S(fz, "reason").c_str(), (now - since) / 1000);
             else if (ev > 0) snprintf(frz, sizeof frz, "ok (%.0f past)", ev);
         }
-        printf("%-18s %-5s %9s %9s %9s %6.1f%% %6.1f%% %5.0f %6.0f %-8s %6s %4s %-26s %-8s %-20s %s\n", id.c_str(), conn ? "yes" : "no",
+        // route: Steam P2P path (direct / relay = Steam Datagram Relay / unknown)
+        std::string route; json::get_str(p, "route", route); if (route.empty()) route = "-";
+        printf("%-18s %-5s %-7s %9s %9s %9s %6.1f%% %6.1f%% %5.0f %6.0f %-8s %6s %4s %-26s %-8s %-20s %s\n", id.c_str(), conn ? "yes" : "no", route.c_str(),
                fmt_bytes(vs).c_str(), fmt_bytes(vi).c_str(), fmt_bytes(vr).c_str(),
                t8 ? 100.0 * wf / t8 : 0, t3 ? 100.0 * rwf / t3 : 0, N(p, "vehicles"), t8, behind, lag, tps, posS, ago, frz,
                S(p, "name").empty() ? "-" : S(p, "name").c_str());
@@ -135,7 +137,7 @@ static void print_peers(const std::string& r, bool rates) {
 
 static void print_vehicles(const std::string& r) {
     const char* o = r.c_str();
-    printf("%-6s %-6s %-8s %-30s %-6s %s\n", "id", "group", "tick", "pos (x y z)", "I_src", "feeds (steamId:gap)");
+    printf("%-6s %-6s %-8s %-20s %-30s %-6s %s\n", "id", "group", "tick", "held", "pos (x y z)", "I_src", "feeds (steamId:serverGap/sentEvery/mode)");
     json::for_each_elem(json::find_value(o, "vehicles"), [&](const char* v) {
         double pos[3] = {0,0,0};
         json::arr_nums(json::find_value(v, "pos"), pos, 3);
@@ -144,9 +146,20 @@ static void print_vehicles(const std::string& r) {
         double sg = N(v, "srcGap");
         if (sg > 0) snprintf(srcS, sizeof srcS, "%.0f", sg); else strcpy(srcS, "-");
         char grpS[16]; double g; if (json::get_num(v, "group", g)) snprintf(grpS, sizeof grpS, "%.0f", g); else strcpy(grpS, "?");
-        printf("%-6.0f %-6s %-8.0f %-30s %-6s", N(v, "id"), grpS, N(v, "tick"), posS, srcS);
+        // src: addon = position received from the WebMap addon (* = no native template yet), native = server;
+        // the fake_missile role follows (alias/park >target, standby)
+        std::string src, fake; json::get_str(v, "src", src); json::get_str(v, "fake", fake);
+        bool tmpl = false; json::get_bool(v, "template", tmpl);
+        double ft = 0; json::get_num(v, "fakeTarget", ft);
+        char srcCol[48];
+        const char* star = (src == "addon" && !tmpl) ? "*" : "";
+        if (fake == "alias" || fake == "park") snprintf(srcCol, sizeof srcCol, "%s%s %s>%.0f", src.c_str(), star, fake.c_str(), ft);
+        else snprintf(srcCol, sizeof srcCol, "%s%s%s%s", src.c_str(), star, fake.empty() ? "" : " ", fake.c_str());
+        printf("%-6.0f %-6s %-8.0f %-20s %-30s %-6s", N(v, "id"), grpS, N(v, "tick"), srcCol, posS, srcS);
         json::for_each_elem(json::find_value(v, "feeds"), [&](const char* f) {
-            printf(" %s:%.0f", ID(f, "steamId").c_str(), N(f, "gap"));
+            // mode: pass = server record as is, relay = rewritten from server samples, addon = from WebMap, fake
+            std::string mode; json::get_str(f, "mode", mode);
+            printf(" %s:%.0f/%.0f/%s", ID(f, "steamId").c_str(), N(f, "gap"), N(f, "every"), mode.c_str());
         });
         printf("\n");
     });

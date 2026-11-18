@@ -382,7 +382,10 @@ static void render_peers() {
         double t3 = N(p, "type3"), rwf = N(p, "rwalkFull"), pos[3] = {0,0,0};
         bool hasPos = json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3;
         SyncCells sc = sync_cells(p, now);
-        rows.push_back({ name_of(id), W(ids), conn ? L"接続中" : L"切断", sc.behind, sc.lag, sc.tps,bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
+        // Steam P2P の経路: 直接 / 中継（Steam Datagram Relay）/ 不明（接続前・取得できない）
+        std::string route = Sx(p, "route");
+        std::wstring routeW = route == "relay" ? L"中継" : route == "direct" ? L"直接" : L"不明";
+        rows.push_back({ name_of(id), W(ids), conn ? L"接続中" : L"切断", routeW, sc.behind, sc.lag, sc.tps,bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
                          fmtw(L"%.1f%%", t8 ? 100.0 * wf / t8 : 0), fmtw(L"%.1f%%", t3 ? 100.0 * rwf / t3 : 0),
                          hasPos ? fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-",
                          fmtw(L"%.0f", N(p, "vehicles")), fmtw(L"%.0f 秒前", ago), freeze_text(p, now) });
@@ -402,19 +405,41 @@ static void render_vehicles() {
         json::arr_nums(json::find_value(v, "pos"), pos, 3);
         double sg = N(v, "srcGap"), grp;
         bool hasGrp = json::get_num(v, "group", grp);
-        std::wstring feeds; int nf = 0; double minGap = 1e9;
+        // 送り方（受信者ごと）: そのまま = サーバーの記録をそのまま / SW MultiSync経由 = サーバーの位置で書き換え /
+        // WebMap経由 = WebMap（アドオン）から受け取った位置で書き換え / fake = fake_missile の書き換え
+        auto modeName = [](const std::string& m) -> std::wstring {
+            if (m == "pass") return L"そのまま";
+            if (m == "relay") return L"SW MultiSync経由";
+            if (m == "addon") return L"WebMap経由";
+            if (m == "fake") return L"fake";
+            return L"?";
+        };
+        std::wstring feeds, modes; int nf = 0; double minGap = 1e9;
         json::for_each_elem(json::find_value(v, "feeds"), [&](const char* f) {
             uint64_t id = 0; json::get_u64(f, "steamId", id); double g = N(f, "gap");
+            std::wstring mw = modeName(Sx(f, "mode"));
             if (g < minGap) minGap = g; nf++;
             if (!feeds.empty()) feeds += L", ";
             auto it = g_names.find(id);
-            feeds += it != g_names.end() ? it->second + fmtw(L":%.0f", g) : fmtw(L"%llu:%.0f", (unsigned long long)id, g);
+            // 間隔: 実際にその人へ届く間隔。書き換えて自分で送っているときは、サーバー本来の間隔を括弧で添える
+            double every = N(f, "every"); if (every <= 0) every = g;
+            std::wstring gapW = every != g ? fmtw(L":%.0f(サーバー%.0f)", every, g) : fmtw(L":%.0f", g);
+            feeds += (it != g_names.end() ? it->second : fmtw(L"%llu", (unsigned long long)id)) + gapW + L" " + mw;
+            if (modes.find(mw) == std::wstring::npos) modes += (modes.empty() ? L"" : L" / ") + mw;
         });
-        rows.push_back({ fmtw(L"%.0f", N(v, "id")), hasGrp ? fmtw(L"%.0f", grp) : L"不明", fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]),
+        if (modes.empty()) modes = L"-（受信者なし）";
+        // fake の役割と、ひな形（サーバーの記録）がまだ無い車両（クライアントへ足せない）
+        std::string fake = Sx(v, "fake");
+        double ft = 0; json::get_num(v, "fakeTarget", ft);
+        if (fake == "alias") modes = fmtw(L"fake:追従→%.0f", ft);
+        else if (fake == "park") modes = fmtw(L"fake:船の下→%.0f", ft);
+        else if (fake == "standby") modes = L"fake:待機";
+        if (!B(v, "template")) modes += L"（ひな形なし）";
+        rows.push_back({ fmtw(L"%.0f", N(v, "id")), hasGrp ? fmtw(L"%.0f", grp) : L"不明", modes, fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]),
                          sg > 0 ? fmtw(L"%.0f", sg) : L"-", fmtw(L"%d", nf), feeds });
     });
     lv_fill(H(ID_VEH_LV), rows);
-    set(ID_VEH_LBL, fmtw(L"車両 (%d)  — グループ: 注入前スポーンは不明 / I_src: 最密な更新間隔tick / 受信者: 名前(不明ならSteamID):間隔tick", (int)rows.size()));
+    set(ID_VEH_LBL, fmtw(L"車両 (%d)  — グループ: 注入前スポーンは不明 / 送り方: そのまま・SW MultiSync経由・WebMap経由 / I_src: 最密な更新間隔tick / 受信者: 名前(不明ならSteamID):間隔tick 送り方", (int)rows.size()));
 }
 
 static void render_log() {
@@ -508,11 +533,11 @@ static void build_ui() {
     mk(L"BUTTON", L"", WS_TABSTOP | BS_PUSHBUTTON, X + 410, Y + 62, 260, 22, ID_ADDON_BTN, 0);
     mk(L"STATIC", L"参加プレイヤー", 0, X, Y + 66, 400, 18, ID_PEERS_LBL, 0);
     HWND pl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 86, WID, 176, ID_PEERS_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(pl, { {L"名前", 110}, {L"SteamID", 125}, {L"状態", 50}, {L"遅延(申告)", 70}, {L"tick差", 50}, {L"TPS", 40},{L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40},{L"最終通信", 60}, {L"凍結検知", 110} });
+    lv_cols(pl, { {L"名前", 110}, {L"SteamID", 125}, {L"状態", 50}, {L"経路", 50}, {L"遅延(申告)", 70}, {L"tick差", 50}, {L"TPS", 40},{L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40},{L"最終通信", 60}, {L"凍結検知", 110} });
     mk(L"STATIC", L"車両", 0, X, Y + 272, 640, 18, ID_VEH_LBL, 0);
     mk(L"BUTTON", L"車両一覧を表示（デバッグ用）", WS_TABSTOP | BS_AUTOCHECKBOX, X + WID - 220, Y + 270, 220, 22, ID_VEH_CHK, 0);
     HWND vl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 292, WID, 220, ID_VEH_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(vl, { {L"ID", 50}, {L"グループ", 60}, {L"位置 (x, y, z)", 210}, {L"I_src", 50}, {L"受信者数", 60}, {L"受信者 (名前:間隔)", 400} });
+    lv_cols(vl, { {L"ID", 50}, {L"グループ", 60}, {L"送り方", 170}, {L"位置 (x, y, z)", 210}, {L"I_src", 50}, {L"受信者数", 60}, {L"受信者 (名前:間隔)", 400} });
 
     // --- settings tab
     mk(L"STATIC", L"項目をクリックして値を編集し「適用」。適用した値は稼働中すぐ効きます。「iniに保存」で次回以降にも引き継がれます。",

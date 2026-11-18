@@ -559,6 +559,38 @@ inline bool managed(uint64_t peer, uint32_t V, uint32_t tick) {
     return true;
 }
 
+// How recipient `peer` is currently given V (stats only; mirrors build_inject's decisions at the peer's
+// last send tick): "fake" = fake_missile alias / park / standby rewrite, "pass" = the server's record as is,
+// "addon" = pose rewritten from the WebMap addon's samples, "relay" = pose rewritten from server samples
+// (another recipient's denser feed, or this one's extrapolated). A native record is rewritten when V is
+// managed, or when its gap exceeds Λ (pose moved ahead, server ETA kept).
+inline const char* feed_mode(uint64_t peer, uint32_t V, bool relayOn) {
+    if (is_aliased(V) || g_standby.count(V)) return "fake";
+    auto vit = g_veh.find(V);
+    if (!relayOn || vit == g_veh.end() || !vit->second.has || !has_velocity(vit->second)) return "pass";
+    const Veh& v = vit->second;
+    auto pt = g_peerProc.find(peer);
+    uint32_t tick = pt != g_peerProc.end() ? pt->second : v.curT;
+    if (!managed(peer, V, tick)) {
+        auto git = g_natGap.find(std::make_pair(peer, V));
+        if (git == g_natGap.end() || git->second <= (uint32_t)g_cfg.lag) return "pass";
+    }
+    return (v.addonT != 0 && v.curT == v.addonT) ? "addon" : "relay";
+}
+
+// Ticks between the records recipient `peer` actually gets for V (stats only): the relay cadence when V is
+// managed (we append / rewrite on our own schedule), else the server's own native gap.
+inline uint32_t feed_every(uint64_t peer, uint32_t V) {
+    auto git = g_natGap.find(std::make_pair(peer, V));
+    uint32_t nat = git != g_natGap.end() ? git->second : 0;
+    auto vit = g_veh.find(V);
+    if (vit == g_veh.end() || !vit->second.has) return nat;
+    auto pt = g_peerProc.find(peer);
+    uint32_t tick = pt != g_peerProc.end() ? pt->second : vit->second.curT;
+    if (!managed(peer, V, tick)) return nat;
+    return (uint32_t)interval_of(vit->second, nat_gap_of(vit->second, peer, V, tick));
+}
+
 // Fill one 0x81 record's body0 pose (at `r`, `avail` bytes) with the pose PREDICTED at `targetTick`.
 inline void fill_pose(uint8_t* r, int avail, const Veh& v, uint32_t targetTick) {
     if (14 < avail && r[14] == 1 && 31 + 24 <= avail) {
