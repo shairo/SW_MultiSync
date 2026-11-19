@@ -64,6 +64,17 @@ inline int64_t  g_votes[kVoteRing];
 inline int      g_nVotes = 0, g_voteHead = 0;
 inline bool     g_anyTc = false;
 inline uint32_t g_lastTc = 0;
+// addon generation (WebMapBridge 2026-11: "ep" on each batch; absent from older Bridges). A new ep = the
+// addon was re-created (?reload_scripts / another world): offset estimation starts over. Within one ep tc
+// only grows, so a batch whose tc went back arrived late and is dropped instead of resetting the offset.
+inline bool     g_anyEp = false;
+inline double   g_lastEp = 0;
+inline uint64_t g_staleBatches = 0;   // same-ep batches dropped because tc went back
+inline uint64_t g_epChanges = 0;
+// world tick of the last batch; the fake_missile alias / standby / park lists expire when no batch came for
+// `stale` ticks (the Bridge or the addon stopped), so fakes are not kept mirrored on stale orders.
+inline uint32_t g_lastBatchTick = 0;
+inline uint64_t g_fakeExpired = 0;
 constexpr int kArrRing = 64;
 constexpr int kArrMin  = 8;            // fl == 0 arrivals needed before the arrival offset is used
 inline int64_t  g_arr[kArrRing];
@@ -189,7 +200,7 @@ inline void retry_pending() {
 
 inline void install() { relay::g_onNative = &on_native; }
 
-// IPC `addon.poses`: {"cmd":"addon.poses","tc":N,"data":[[id,x,y,z,qx,qy,qz,qw],...]}.
+// IPC `addon.poses`: {"cmd":"addon.poses","ep":E,"tc":N,"data":[[id,x,y,z,qx,qy,qz,qw],...]} ("ep" optional).
 // Returns the number of records parsed (fed or not); `fed` counts those handed to the relay.
 inline int on_batch(const char* line, uint32_t nowTick, int& fedOut) {
     fedOut = 0;
@@ -198,8 +209,14 @@ inline int on_batch(const char* line, uint32_t nowTick, int& fedOut) {
     uint32_t tc = (uint32_t)tcd;
     const char* data = json::find_value(line, "data");
     if (!data || *data != '[') { g_bad++; return -1; }
-    if (g_anyTc && tc < g_lastTc) reset_offset();               // ?reload_scripts: tc restarted
+    double ep;
+    if (json::get_num(line, "ep", ep)) {
+        if (g_anyEp && ep != g_lastEp) { reset_offset(); g_anyTc = false; g_epChanges++; }   // new addon generation
+        g_anyEp = true; g_lastEp = ep;
+        if (g_anyTc && tc < g_lastTc) { g_staleBatches++; return 0; }   // late batch of this ep: ignore
+    } else if (g_anyTc && tc < g_lastTc) reset_offset();        // older Bridge (no ep): ?reload_scripts restarted tc
     g_anyTc = true; g_lastTc = tc;
+    g_lastBatchTick = nowTick;
     g_batches++;
     double fl;
     if (json::get_num(line, "fl", fl) && fl == 0 && nowTick > 0) add_arrival((int64_t)nowTick - (int64_t)tc);
@@ -268,6 +285,17 @@ inline int on_batch(const char* line, uint32_t nowTick, int& fedOut) {
         relay::prune_addon_only(nowTick);
     }
     return parsed;
+}
+
+// Called on each outgoing type=8 send (world tick T). Drops the fake_missile alias / standby / park lists
+// when the addon feed stopped for `stale` ticks: they are orders from the addon, valid only while it sends.
+inline void expire_fakes(uint32_t T) {
+    if (relay::g_alias.empty() && relay::g_standby.empty() && relay::g_park.empty()) return;
+    if (g_lastBatchTick == 0 || T <= g_lastBatchTick + (uint32_t)relay::g_cfg.stale) return;
+    relay::set_standby({});          // first: released aliases then snap back to the real pose, not to standby
+    relay::g_park.clear();
+    relay::set_alias({});
+    g_fakeExpired++;
 }
 
 } // namespace addon

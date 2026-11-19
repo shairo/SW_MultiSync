@@ -446,6 +446,7 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
                 }
                 off += L;
             }
+            addon::expire_fakes(tick);                               // fake orders lapse when the addon feed stopped
             if (g_relay || !relay::g_alias.empty() || !relay::g_releaseSnap.empty() || !relay::g_standby.empty() || relay::g_orbit.on) {   // build the injected copy (alias / orbit work with relay off)
                 int cap = (int)cub + relay::kMaxPerSend * relay::kMaxRecLen;
                 inj = static_cast<uint8_t*>(malloc(cap));
@@ -652,6 +653,7 @@ static void write_status(json::JsonW& w) {
         .kv("lastTc", (unsigned)addon::g_lastTc)
         .kv("batches", addon::g_batches).kv("samples", addon::g_samples).kv("fed", addon::g_fed)
         .kv("bad", addon::g_bad).kv("votes", addon::g_voteCount).kv("resets", addon::g_resets)
+        .kv("staleBatches", addon::g_staleBatches).kv("epChanges", addon::g_epChanges).kv("fakeExpired", addon::g_fakeExpired)
         .kv("aliasRecords", relay::g_aliasRecords)
         .kv("aliasSnaps", relay::g_aliasSnaps)
         .kv("aliasCacheStarts", relay::g_aliasCacheStarts)
