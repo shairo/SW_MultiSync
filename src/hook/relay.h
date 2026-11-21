@@ -410,6 +410,11 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
             // count reflects what it currently receives (a reload repopulates within two 0x81).
             auto key = std::make_pair(peer, V);
             g_natLast.erase(key); g_natGap.erase(key); g_natEta.erase(key); g_sent.erase(key);
+            // A fake this client unloads (reload with the same id, lifecycle.md) starts over there: its next
+            // record jumps again (ETA = now) and is re-sent even if T's promise did not change.
+            auto mit = g_mirror.find(key);
+            if (mit != g_mirror.end()) { mit->second.snapped = false; mit->second.sentEta = 0; }
+            g_standbySent.erase(key);
         }
         if (tag == 0x2B) {
             // Spawn placement: ... + double[3] + u32 groupId + u32 vehId + ... (lifecycle.md). A multi-body
@@ -1135,6 +1140,11 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
             uint32_t V = rec::U32(body, blen, off + 4);
             auto key = std::make_pair(peer, V);
             auto vit = g_veh.find(V);
+            // body0 must be the type-1 root: fill_pose only writes such a record, so rewriting just the ETA of
+            // any other record would hurry the client to the old pose (protocol/sync.md: those stay native).
+            // Mark it handled so pass 2 never appends a second record for V on top of it.
+            const bool root1 = off + 14 < blen && body[off + 14] == 1 && off + 31 + 24 <= blen;
+            if (!root1) { handled.insert(V); off += L; continue; }
             if (vit != g_veh.end() && vit->second.has && has_velocity(vit->second)) {
                 const Veh& v = vit->second;
                 bool mg = managed(peer, V, tick);
