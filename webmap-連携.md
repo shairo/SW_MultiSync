@@ -115,6 +115,7 @@ SW_MultiSync が居なければ何も載せません（`WEBMAP_SWHOOK_LAG=0` で
 - 位置と回転は body0 から見た相対に直します（車体が走るだけでは変わらないので、砲塔・砲が動いたときだけ送ります）。
 - 送るのは前回から変わった body だけで、60 tick ごとには必ず送ります。
 - `bp` を送る車両は、車体が止まっていても `data` に body0 を載せます（SW_MultiSync は body0 で車両の間隔を測るため）。
+- 負荷: `getVehiclePos` は計算が重めで、Tank の車両ごとに voxel の数だけ呼び出しが増えます。2026-11-21 の測定では、止まった戦車 10 両（body 2 つずつ）を Tank にすると、vpos は 1 tick あたり約 1.5 倍、TPS は約 65 → 約 57 になりました。詳しくは `Stormworks_WebMap` の `docs/progress/turret-sync.md` の「通信量と TPS の測定」です（減らす案は書いてありますが、作っていません）。
 
 ### SW_MultiSync が書き換える
 
