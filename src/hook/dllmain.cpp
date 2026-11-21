@@ -20,6 +20,7 @@
 #include "steam_min.h"
 #include "rec.h"
 #include "relay.h"
+#include "addon.h"
 #include "stats.h"
 #include "freeze.h"
 #include "tiles.h"
@@ -310,18 +311,43 @@ static void put_chat(std::vector<uint8_t>& v, const std::string& text, const std
 
 // ---- in-game chat commands (`?` lines go to addons and never reach the chat, so only the DLL sees them) ----
 #include "unstuck.h"
-// `?multisync`: tell that player alone the DLL version and whether relay is on — a status check from inside the game.
-static void on_multisync(uint64_t sid) {
+// Queue a chat line to that player alone (rides along with a pending nudge instead of dropping it).
+static void tell_player(uint64_t sid, const char* msg, const char* kind) {
     std::vector<uint8_t> v;
-    char msg[96]; _snprintf_s(msg, _TRUNCATE, "SW_MultiSync v%s  relay: %s", SWHOOK_VERSION, g_relay ? "ON" : "OFF");
     put_chat(v, msg, "[SW_MultiSync]");
-    auto it = g_nudge.find(sid);                              // don't drop a pending nudge: ride along with it
+    auto it = g_nudge.find(sid);
     if (it != g_nudge.end()) { it->second.recs.insert(it->second.recs.end(), v.begin(), v.end()); ++it->second.count; }
-    else { Nudge nd; nd.kind = "multisync"; nd.recs = std::move(v); nd.count = 1; g_nudge[sid] = std::move(nd); }
+    else { Nudge nd; nd.kind = kind; nd.recs = std::move(v); nd.count = 1; g_nudge[sid] = std::move(nd); }
+}
+static const char* bs_state(uint64_t sid) {
+    if (!relay::g_bodyPeers.count(sid)) return "OFF";
+    return relay::g_cfg.bodySync ? "ON" : "ON (server-wide bodySync is OFF)";
+}
+// `?multisync`: tell that player alone the DLL version, whether relay is on and their own gun sync (?bs).
+static void on_multisync(uint64_t sid) {
+    char msg[128]; _snprintf_s(msg, _TRUNCATE, "SW_MultiSync v%s  relay: %s  bs(you): %s", SWHOOK_VERSION, g_relay ? "ON" : "OFF", bs_state(sid));
+    tell_player(sid, msg, "multisync");
     logf("== multisync: peer=%llu relay=%d ==\n", (unsigned long long)sid, (int)g_relay);
+}
+// `?bs` shows, `?bs on` / `?bs off` sets the turret / gun rewrite for that player alone (2026-11-21; default off).
+// The reply goes to that player alone. Live only (not saved): a re-inject turns everyone off again.
+// Shared by the chat command and IPC `bodysync.peer` (control plane: every runtime switch is reachable over IPC).
+static void set_body_peer(uint64_t sid, int set) {
+    if (set == 1) relay::g_bodyPeers.insert(sid);
+    else if (set == 0) relay::g_bodyPeers.erase(sid);
+}
+static void on_bs(uint64_t sid, int set) {   // set: -1 = show, 0 = off, 1 = on
+    set_body_peer(sid, set);
+    char msg[96]; _snprintf_s(msg, _TRUNCATE, "bs (turret / gun sync for you): %s", bs_state(sid));
+    tell_player(sid, msg, "bs");
+    logf("== bs: peer=%llu %s -> %d (players on %zu) ==\n", (unsigned long long)sid, set < 0 ? "show" : "set",
+         (int)relay::g_bodyPeers.count(sid), relay::g_bodyPeers.size());
 }
 static void on_chat_cmd(uint64_t sid, const stats::Peer& ps, const uint8_t* s, int n, uint64_t now) {   // exact match
     if (n == 10 && !memcmp(s, "?multisync", 10)) on_multisync(sid);
+    else if (n == 3 && !memcmp(s, "?bs", 3)) on_bs(sid, -1);
+    else if (n == 6 && !memcmp(s, "?bs on", 6)) on_bs(sid, 1);
+    else if (n == 7 && !memcmp(s, "?bs off", 7)) on_bs(sid, 0);
     else if (int mode = unstuck_cmd(s, n)) on_unstuck(sid, ps, mode, now);
 }
 
@@ -362,9 +388,43 @@ static uint8_t* append_records(const uint8_t* src, uint32_t cub, const std::vect
 }
 
 // ---- hooks ----
+// Steam P2P route of one peer (direct or relayed). Called from the game's own send call (its thread),
+// at most every stats::kRouteMs per peer; SEH-guarded so a bad vtable slot cannot take the server down.
+static int32_t query_route(void* self, const SteamNetworkingIdentity* id, int32_t& outFlags) {
+    alignas(8) uint8_t info[1024];
+    alignas(8) uint8_t quick[1024];
+    memset(info, 0, sizeof info); memset(quick, 0, sizeof quick);
+    int32_t state = -1;
+    __try {
+        auto fn = reinterpret_cast<GetSessionConnectionInfo_t>((*reinterpret_cast<void***>(self))[kVT_GetSessionConnectionInfo]);
+        state = fn(self, id, info, quick);
+        memcpy(&outFlags, info + kConnInfoFlagsOff, 4);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { state = -1; }
+    return state;
+}
+static void poll_route(void* self, const SteamNetworkingIdentity* id, uint64_t sid) {
+    uint64_t now = GetTickCount64();
+    EnterCriticalSection(&g_cs);
+    auto it = stats::g_peers.find(sid);
+    bool due = it != stats::g_peers.end() && now - it->second.routeMs >= stats::kRouteMs;
+    if (due) it->second.routeMs = now;
+    LeaveCriticalSection(&g_cs);
+    if (!due) return;
+    int32_t fl = 0;
+    int32_t st = query_route(self, id, fl);
+    EnterCriticalSection(&g_cs);
+    auto jt = stats::g_peers.find(sid);
+    if (jt != stats::g_peers.end()) {
+        jt->second.connState = st;
+        jt->second.relayed = st == kConnState_Connected ? ((fl & kConnFlag_Relayed) ? 1 : 0) : -1;
+    }
+    LeaveCriticalSection(&g_cs);
+}
+
 static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
                            const void* data, uint32_t cub, int32_t flags, int32_t ch) {
     InFlight guard;
+    if (id && id->m_eType == 16) poll_route(self, id, peer_id(id));
     const uint8_t* b = static_cast<const uint8_t*>(data);
     bool head = cub >= 28 && *reinterpret_cast<const uint32_t*>(b) == 0;   // frag==0 (single-frame head)
     const uint8_t* body = b + 8; int blen = (int)cub - 8;
@@ -411,12 +471,13 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
                 }
                 off += L;
             }
-            if (g_relay) {                                           // build the injected copy
+            addon::expire_fakes(tick);                               // fake orders lapse when the addon feed stopped
+            if (g_relay || !relay::g_alias.empty() || !relay::g_releaseSnap.empty() || !relay::g_standby.empty()) {   // build the injected copy (alias works with relay off)
                 int cap = (int)cub + relay::kMaxPerSend * relay::kMaxRecLen;
                 inj = static_cast<uint8_t*>(malloc(cap));
                 if (inj) {
                     uint64_t recBefore = relay::g_injRecords + relay::g_rewrites;
-                    newcub = relay::build_inject(sid, static_cast<const uint8_t*>(data), (int)cub, inj, cap, tick);
+                    newcub = relay::build_inject(sid, static_cast<const uint8_t*>(data), (int)cub, inj, cap, tick, g_relay);
                     if (newcub > 0) {
                         ps.injSends++; ps.injBytes += (uint64_t)(newcub - (int)cub);
                         ps.injRecords += (relay::g_injRecords + relay::g_rewrites) - recBefore;
@@ -610,6 +671,96 @@ static void write_status(json::JsonW& w) {
         .kv("sends", relay::g_injSends).kv("appended", relay::g_injRecords)
         .kv("rewritten", relay::g_rewrites).kv("bytes", relay::g_injBytes).end();
     w.kv("seq", g_seq).kv("marks", g_markCount).kv("freezeEvents", freeze::g_events);
+    w.key("addon").obj()
+        .kvb("offsetKnown", addon::g_kKnown).kv("offset", addon::g_k).kv("source", addon::source_name())
+        .kvb("matchedKnown", addon::g_kMatchKnown).kv("matchedOffset", addon::g_kMatch)
+        .kvb("arrivalKnown", addon::g_kArrKnown).kv("arrivalOffset", addon::g_kArr).kv("disagree", addon::g_disagree)
+        .kv("lastTc", (unsigned)addon::g_lastTc)
+        .kv("batches", addon::g_batches).kv("samples", addon::g_samples).kv("fed", addon::g_fed)
+        .kv("bad", addon::g_bad).kv("votes", addon::g_voteCount).kv("resets", addon::g_resets)
+        .kv("staleBatches", addon::g_staleBatches).kv("epChanges", addon::g_epChanges).kv("fakeExpired", addon::g_fakeExpired)
+        .kv("aliasRecords", relay::g_aliasRecords)
+        .kv("aliasSnaps", relay::g_aliasSnaps)
+        .kv("aliasCacheStarts", relay::g_aliasCacheStarts)
+        .kv("parked", (uint64_t)relay::g_park.size())
+        .kv("parkRecords", relay::g_parkRecords)
+        .kvb("kindsKnown", relay::g_kindsKnown).kv("kindUpdates", relay::g_kindUpdates)
+        .kv("kindSkipped", relay::g_kindSkipped).kv("kindDropped", relay::g_kindDropped)
+        .kv("kindVehicles", (unsigned)relay::g_kindOf.size())
+        .kv("standby", (unsigned)relay::g_standby.size())
+        .kv("standbyRecords", relay::g_standbyRecords);
+    w.key("alias").arr();
+    for (auto& a : relay::g_alias) w.arr().num((unsigned)a.first).num((unsigned)a.second).end();
+    w.end();
+    // turret / gun prototype (relay.h body_*): errors = addon prediction vs native 0x81, before each re-measure
+    w.key("bodies").obj()
+        .kv("sync", relay::g_cfg.bodySync).kv("tracks", (unsigned)relay::g_bodies.size())
+        .kv("samples", relay::g_bodySamples).kv("measured", relay::g_bodyMeasured)
+        .kv("writes", relay::g_bodyWrites).kv("built", relay::g_bodyBuilt).kv("checks", relay::g_bodyErrN)
+        .kv("pending", (unsigned)relay::g_bodyPending.size()).kv("pendingDropped", relay::g_bodyPendingDropped).kv("rejected", relay::g_bodyRejected).kv("resets", relay::g_bodyResets)
+        .kv("errPosAvg", relay::g_bodyErrN ? relay::g_bodyErrPosSum / relay::g_bodyErrN : 0.0)
+        .kv("errAngAvg", relay::g_bodyErrN ? relay::g_bodyErrAngSum / relay::g_bodyErrN : 0.0)
+        .kv("errPosMax", relay::g_bodyErrPosMax).kv("errAngMax", relay::g_bodyErrAngMax);
+    w.key("list").arr();
+    {
+        int k = 0;
+        for (auto& kv : relay::g_bodies) {
+            if (k++ >= 64) break;
+            const relay::BodyTrack& b = kv.second;
+            w.obj().kv("veh", (unsigned)kv.first.first).kv("body", kv.first.second).kvb("offKnown", b.offKnown)
+                .kv("offX", b.off[0]).kv("offY", b.off[1]).kv("offZ", b.off[2]).kv("measured", b.measured)
+                .kv("errPos", b.errPos).kv("errAng", b.errAng).kv("okRun", b.okRun).kv("missRun", b.missRun).kv("rejected", b.rejected).kv("resets", b.resets)
+                .kv("lastT", (unsigned)(b.n ? relay::body_latest(b).t : 0)).end();
+        }
+    }
+    w.end();
+    // what each client is shown vs the true body angle (server's own type-2, before rewrites); degrees
+    w.key("view").arr();
+    {
+        int k = 0;
+        for (auto& kv : relay::g_bodyView) {
+            if (k++ >= 64) break;
+            const relay::BodyView& v = kv.second;
+            w.obj().kv("veh", (unsigned)std::get<0>(kv.first)).kv("body", std::get<1>(kv.first)).kv("peer", std::get<2>(kv.first))
+                .kv("nat2", v.nat2).kv("nat0", v.nat0).kv("n", v.n).kv("last", v.last).kv("avg", v.n ? v.sum / v.n : 0.0).kv("max", v.max)
+                .kv("stillN", v.stillN).kv("stillLast", v.stillLast).kv("stillAvg", v.stillN ? v.stillSum / v.stillN : 0.0).kv("stillMax", v.stillMax).end();
+        }
+    }
+    w.end();
+    // what each client was actually sent (native type 2 or our near-client write) vs the true body angle
+    w.kv("near", relay::g_bodyNear);
+    // players who turned the gun rewrite on (`?bs on`); everyone else gets the server's bodies as they are
+    w.key("players").arr();
+    for (uint64_t sid : relay::g_bodyPeers) {
+        auto pit = stats::g_peers.find(sid);
+        w.obj().kv("peer", sid).kv("name", pit != stats::g_peers.end() ? pit->second.name : std::string()).end();
+    }
+    w.end();
+    w.key("shown").arr();
+    {
+        int k = 0;
+        for (auto& kv : relay::g_bodyShown) {
+            if (k++ >= 64) break;
+            const relay::BodyShown& v = kv.second;
+            w.obj().kv("veh", (unsigned)std::get<0>(kv.first)).kv("body", std::get<1>(kv.first)).kv("peer", std::get<2>(kv.first))
+                .kv("n", v.n).kv("last", v.last).kv("avg", v.n ? v.sum / v.n : 0.0).kv("max", v.max)
+                .kv("stillN", v.stillN).kv("stillAvg", v.stillN ? v.stillSum / v.stillN : 0.0).kv("stillMax", v.stillMax).end();
+        }
+    }
+    w.end();
+    w.end();
+    {
+        int64_t am; int as;
+        bool have = addon::arrival_mode(am, as);
+        w.key("arrival").obj().kv("samples", addon::g_arrSamples).kv("skipped", addon::g_arrSkipped)
+         .kv("window", addon::g_nArr).kv("support", as);
+        if (have) w.kv("offset", am);
+        w.key("hist").obj();
+        std::map<int64_t, int> h; for (int i = 0; i < addon::g_nArr; i++) h[addon::g_arr[i]]++;
+        for (auto& kv : h) { char k[24]; snprintf(k, sizeof k, "%lld", (long long)kv.first); w.kv(k, kv.second); }
+        w.end().end();
+    }
+    w.end();
 }
 static void write_peers(json::JsonW& w) {
     uint64_t now = GetTickCount64();
@@ -626,7 +777,8 @@ static void write_peers(json::JsonW& w) {
          .kv("injSends", p.injSends).kv("injBytes", p.injBytes).kv("injRecords", p.injRecords)
          .kv("type8", p.type8).kv("walkFull", p.walkFull).kv("walkPartial", p.walkPartial)
          .kv("vehicles", vehs)
-         .kv("type3", p.type3).kv("rwalkFull", p.rwalkFull).kv("rwalkPartial", p.rwalkPartial);
+         .kv("type3", p.type3).kv("rwalkFull", p.rwalkFull).kv("rwalkPartial", p.rwalkPartial)
+         .kv("route", p.relayed == 1 ? "relay" : p.relayed == 0 ? "direct" : "unknown").kv("connState", p.connState);
         if (p.hbMs) w.key("sync").obj().kv("clientTick", p.cliTick).kv("clientTps", p.cliTps)
                        .kv("framesBehind", p.cliBehind).kv("tickLag", p.tickLag).kv("hbMs", p.hbMs).end();
         if (p.posMs) w.key("pos").arr().num(p.px).num(p.py).num(p.pz).end().kv("posMs", p.posMs);
@@ -653,12 +805,24 @@ static void write_vehicles(json::JsonW& w) {
          .key("pos").arr().num(v.cx).num(v.cy).num(v.cz).end()
          .key("rot").arr().num((double)v.cq[0]).num((double)v.cq[1]).num((double)v.cq[2]).num((double)v.cq[3]).end()
          .kv("srcGap", v.srcGap);   // I_src: EMA of ticks between fresh samples (0 = unknown)
+        if (v.addonT) w.kv("addonTick", (unsigned)v.addonT);   // last addon.poses sample (world tick)
+        // where the held pose came from: "addon" (WebMap addon.poses) or "native" (server 0x81);
+        // template = a native record exists, so the vehicle can be appended to clients
+        w.kv("src", (v.addonT != 0 && v.curT == v.addonT) ? "addon" : "native").kv("template", v.len > 0);
+        // fake_missile role: alias (on a missile), park (under a ship), standby (500 m below its pose)
+        uint32_t fid = kv.first;
+        if (relay::is_aliased(fid)) {
+            uint32_t tid = 0; for (auto& x : relay::g_alias) if (x.first == fid) tid = x.second;
+            w.kv("fake", relay::g_park.count(fid) ? "park" : "alias").kv("fakeTarget", (unsigned)tid);
+        } else if (relay::g_standby.count(fid)) w.kv("fake", "standby");
         auto grp = relay::g_group.find(kv.first);
         if (grp != relay::g_group.end()) w.kv("group", (unsigned)grp->second);   // absent: spawned before we hooked
         // which recipients see this vehicle, and how coarsely (native gap in ticks = distance proxy)
         w.key("feeds").arr();
         for (auto& g : relay::g_natGap) if (g.first.second == kv.first)
-            w.obj().kv("steamId", g.first.first).kv("gap", (unsigned)g.second).end();
+            w.obj().kv("steamId", g.first.first).kv("gap", (unsigned)g.second)
+             .kv("mode", relay::feed_mode(g.first.first, kv.first, g_relay))
+             .kv("every", (unsigned)(g_relay ? relay::feed_every(g.first.first, kv.first) : g.second)).end();
         w.end();
         w.end();
     }
@@ -722,6 +886,28 @@ static std::string ipc_handle(const std::string& line) {
         w.kvb("ok", true).kv("nowMs", GetTickCount64()); write_peers(w);
     } else if (cmd == "vehicles.get") {
         w.kvb("ok", true).kv("nowMs", GetTickCount64()); write_vehicles(w);
+    } else if (cmd == "addon.poses") {
+        int fed = 0, n = addon::on_batch(line.c_str(), g_worldTick, fed);
+        if (n < 0) w.kvb("ok", false).kv("error", "need tc and data[[id,x,y,z,qx,qy,qz,qw],...]");
+        else w.kvb("ok", true).kv("records", n).kv("fed", fed).kvb("offsetKnown", addon::g_kKnown).kv("offset", addon::g_k);
+    } else if (cmd == "bodysync.peer") {
+        // per-player turret / gun sync (same as that player's ?bs on / ?bs off); without "enabled" it only reports
+        std::string ps; double pd = 0; uint64_t sid = 0;
+        if (json::get_str(line.c_str(), "peer", ps)) sid = _strtoui64(ps.c_str(), nullptr, 10);
+        else if (json::get_num(line.c_str(), "peer", pd) && pd > 0) sid = (uint64_t)pd;
+        bool en;
+        if (!sid) w.kvb("ok", false).kv("error", "need peer (SteamID64)");
+        else {
+            if (json::get_bool(line.c_str(), "enabled", en)) {
+                set_body_peer(sid, en ? 1 : 0);
+                logf("== bs: peer=%llu set -> %d (ipc) ==\n", (unsigned long long)sid, en ? 1 : 0);
+            }
+            w.kvb("ok", true).kv("peer", std::to_string(sid)).kvb("enabled", relay::g_bodyPeers.count(sid) > 0)
+             .kvb("bodySync", relay::g_cfg.bodySync != 0);
+        }
+    } else if (cmd == "addon.kinds") {
+        int n = addon::on_kinds(line.c_str());
+        w.kvb("ok", true).kv("vehicles", n);
     } else if (cmd == "relay.set" || cmd == "mutate.set") {
         bool en;
         if (!json::get_bool(line.c_str(), "enabled", en)) { w.kvb("ok", false).kv("error", "missing enabled"); }
@@ -756,11 +942,13 @@ static std::string ipc_handle(const std::string& line) {
         else {
             const relay::CfgField* f = relay::find_field(key.c_str());
             double eff = f ? relay::get_cfg(*f) : val;
+            relay::kind_sweep(false);                     // addonPoses / a kind turned off: drop addon-fed poses now
             logf("== config.set %s=%g (ipc) ==\n", key.c_str(), eff); logflush();
             w.kvb("ok", true).kv("key", key).kv("value", eff).kvb("startupOnly", f ? f->startupOnly : false);
         }
     } else if (cmd == "config.reload") {
         int n = load_relay_config();
+        relay::kind_sweep(false);
         w.kvb("ok", n >= 0).kv("keys", n); write_config(w);
         if (n < 0) w.kv("error", "swhook.ini not found");
     } else if (cmd == "debug.hold" || cmd == "debug.release") {
@@ -888,6 +1076,7 @@ static DWORD WINAPI Worker(LPVOID) {
 
     InitializeCriticalSection(&g_cs);
     g_startMs = GetTickCount64();
+    addon::install();
 
     SYSTEMTIME st; GetLocalTime(&st);
     char* stamp = g_stamp;

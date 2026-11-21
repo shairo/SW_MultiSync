@@ -27,6 +27,9 @@ tool; the bundled GUI / `swctl` use exactly this and nothing else.
 | `stats.get` | – | *status fields* + `peers[]` |
 | `peers.get` | – | `nowMs`, `peers[]` |
 | `vehicles.get` | – | `nowMs`, `vehicles[]` |
+| `addon.poses` | `tc` (addon tick), `data[[id,x,y,z,qx,qy,qz,qw],...]`; optional `ep` (addon generation), `fl` (requests in flight when sent), `bp[[id,body,x,y,z,qx,qy,qz,qw],...]`, `al[[fake,target],...]`, `fk[fake,...]`, `pk[[fake,ship],...]` | `records` (parsed), `fed` (handed to the relay), `offsetKnown`, `offset` — vehicle poses from the WebMap addon, sent by WebMapBridge for every vpos it accepts. See `webmap-連携.md` for what each field does |
+| `bodysync.peer` | `peer` (SteamID64, string or number), optional `enabled` | `peer`, `enabled` (that player's turret / gun sync), `bodySync` (master switch) — the same per-player switch as that player's `?bs on` / `?bs off`; without `enabled` it only reports. Live only (a re-inject turns everyone off) |
+| `addon.kinds` | `Missile` `Ship` `Tank` `SubMarine` `AirCraft` (arrays of vehicle ids) | `vehicles` (ids read) — the MapViewer Type of each vehicle, relayed by WebMapBridge (on change, every 30 s and on every IPC connect). Replaces the whole list; a vehicle in none of them is Other. Gates the addon → body0 source per kind (`addonMissile` `addonShip` `addonTank` `addonSub` `addonAir` `addonOther`); until the first one arrives every vehicle is fed |
 | `relay.set` | `enabled` bool | `relay`, `mutate` |
 | `mutate.set` | `enabled` bool | (debug: X+50 offset demo) |
 | `capture.start` | – | `captureFile` (rolls a new .swcap) |
@@ -50,11 +53,25 @@ captureBytes logFile walkFailFile ipcPort ipcClients ipcRequests peerCount vehic
 `freezeEvents` — freeze-detector onsets this session (all peers).
 `walk{type8 full partial appendOk appendBad dumped}` — record-walker understanding gate
 (`full/type8` = walk rate). `inject{sends appended rewritten bytes}` — relay totals.
+`addon{…}` — the WebMap addon feed (`src/hook/addon.h`, IPC `addon.poses`):
+- tick offset (world tick = addon `tc` + offset): `offsetKnown offset source` (`none` / `arrival` / `matched` / `matched-override` = matched over a disagreeing arrival),
+  `matchedKnown matchedOffset arrivalKnown arrivalOffset disagree`, `arrival{samples skipped window support [offset] hist{}}`
+- feed counters: `lastTc batches samples fed bad votes resets staleBatches` (same-ep batches whose `tc` went back)
+  `epChanges` (new addon generations) `fakeExpired` (fake orders dropped after `stale` ticks without a batch)
+- fake_missile orders: `alias[[fake,target],...] aliasRecords aliasSnaps aliasCacheStarts parked parkRecords standby standbyRecords`
+- per-kind gate (`addon.kinds`): `kindsKnown` (a list has arrived) `kindUpdates` `kindVehicles` (ids in the list) `kindSkipped` (addon samples not used because the kind is off) `kindDropped` (addon-fed vehicles sent back to native when their kind was turned off)
+- `bodies{…}` — turret / gun sync (prototype): `sync` (= `bodySync`), `tracks samples measured writes built checks
+  pending pendingDropped rejected resets errPosAvg errAngAvg errPosMax errAngMax near`;
+  `list[{veh body offKnown offX offY offZ measured errPos errAng okRun missRun rejected resets lastT}]` (up to 64),
+  `view[…]` / `shown[…]` (per vehicle, body and peer: angle between what the client was shown and the true body, degrees),
+  `players[{peer name}]` — who turned it on with `?bs on` (live only; a re-inject turns everyone off)
 
 ### peers[] entry
 `steamId name connected firstSeenMs lastSeenMs lastTick sendCount sendBytes recvCount recvBytes
 injSends injBytes injRecords type8 walkFull walkPartial vehicles
-type3 rwalkFull rwalkPartial [sync{…}] [pos[3] posMs]`
+type3 rwalkFull rwalkPartial route connState [sync{…}] [pos[3] posMs] [freeze{…}]`
+`route` is the Steam P2P path to that player: `direct`, `relay` (through Steam Datagram Relay; only the flag is kept, no address) or `unknown`;
+`connState` the raw Steam connection state.
 `name` is the in-game player name (UTF-8) from the client's join request (RECV msgType=1, see
 `protocol/transport.md`); for players who joined before the DLL was injected it is filled from their
 first chat line (the server's 0x01 echo carries the sender name, `protocol/ui-chat.md`); `""` until then.
@@ -79,7 +96,12 @@ top. `connected` is false after the ch15 close byte or 5 s without any traffic t
 for over 10 minutes are dropped from the list (and from the DLL's table). Counters are per DLL lifetime.
 
 ### vehicles[] entry
-`id tick pos[3] rot[4] srcGap [group] feeds[{steamId,gap}]`
+`id tick pos[3] rot[4] srcGap [addonTick] src template [fake fakeTarget] [group] feeds[{steamId,gap,mode,every}]`
+`addonTick` is the world tick of the last `addon.poses` sample; `src` says where the held pose came from
+(`addon` or `native`); `template` is true once a native record exists (the vehicle can be appended to clients).
+`fake` is the fake_missile role (`alias` on a missile, `park` under a ship, `standby` 500 m below), `fakeTarget`
+the vehicle it follows. In `feeds`, `mode` is how that recipient gets the vehicle (`pass` untouched, `relay`,
+`addon` = relayed from the addon pose, `fake`) and `every` the ticks between the records it actually gets.
 `group` is the spawn group id (a multi-body spawn shares one; equals the first vehicle's id), present
 only for vehicles whose 0x2B placement was seen while hooked.
 `srcGap` is I_src: the EMA of ticks between fresh position samples across all native feeds

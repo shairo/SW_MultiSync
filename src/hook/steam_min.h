@@ -57,6 +57,23 @@ using ReceiveMessagesOnChannel_t = int32_t (*)(
 //   [5] GetSessionConnectionInfo
 constexpr int kVT_SendMessageToUser        = 0;
 constexpr int kVT_ReceiveMessagesOnChannel = 1;
+constexpr int kVT_GetSessionConnectionInfo = 5;
+
+// ESteamNetworkingConnectionState GetSessionConnectionInfo(const SteamNetworkingIdentity&,
+//     SteamNetConnectionInfo_t* pConnectionInfo, SteamNetConnectionRealTimeStatus_t* pQuickStatus)
+using GetSessionConnectionInfo_t = int32_t (*)(
+    void* self,
+    const SteamNetworkingIdentity* identityRemote,
+    void* pConnectionInfo,
+    void* pQuickStatus);
+// SteamNetConnectionInfo_t (pack 8): identity 136 · int64 userData @136 · u32 listenSocket @144 ·
+// SteamNetworkingIPAddr (18 B, pack 1) @148 · u16 pad @166 · POP remote @168 · POP relay @172 · state @176 ·
+// endReason @180 · endDebug[128] @184 · description[128] @312 · int m_nFlags @440 · reserved[63] → 696 B.
+// We read only m_nFlags (never the address).
+constexpr int kConnInfoSize      = 696;
+constexpr int kConnInfoFlagsOff  = 440;
+constexpr int32_t kConnFlag_Relayed = 16;    // k_nSteamNetworkConnectionInfoFlags_Relayed (Steam Datagram Relay)
+constexpr int32_t kConnState_Connected = 3;  // k_ESteamNetworkingConnectionState_Connected
 
 // EResult return; x64 __fastcall (native member-call ABI). `self` = ISteamNetworkingMessages*.
 using SendMessageToUser_t = int32_t (*)(

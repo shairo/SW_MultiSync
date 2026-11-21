@@ -25,8 +25,10 @@ dotnet run -c Release -- <command> "<絶対パス>.swcap" [opts]
    - 同じ車両を `meanGap` 数百で数件だけ受信している peer は**遠方観測者**（低頻度＝dETA大は正常）。
 3. **0x81.time = 未来のワールドtick ETA**（そのposeに到達すべき時刻）。`dETA = time − envelope.tick`。
    近距離=+5、遠方=数百。クライアントは受信〜ETA間で補間し、ETA超過で次が来ないと停止（速度非搭載）。
-4. 0x81 ボディ配置（`protocol.md` 参照）: body0 は必ず type1（`float[4] rot + double[3] pos`＝40B・世界座標）。
-   type2 は `float[4] rot + float[3] pos`＝28B で**body0からの相対**（±数m の一定値になる）。
+4. 0x81 ボディ配置（`protocol.md` 参照）: type1（`float[4] rot + double[3] pos`＝40B・世界座標）は 1 つだけで、
+   **いちばん重い body**（同じ重さならファイルで先の body）。body0 とは限らない（`protocol/sync.md`）。
+   type2 は `float[4] rot + float[3] pos`＝28B で**type1 の body からの相対**（±数m の一定値になる）。
+   各 body の type は `bodyq <file> --id N [--every K]` で見る（一時フォルダーの改造版。まだリポジトリに無い）。
 
 ## 車両フリーズの切り分けレシピ
 
