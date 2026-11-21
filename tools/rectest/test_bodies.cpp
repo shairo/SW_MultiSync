@@ -223,21 +223,6 @@ int main() {
         CHECK(!g_bodyShown.count(std::make_tuple(X, 1, peer)), "shown forgotten with the vehicle");
     }
 
-    // seat hotkey 6 (keyMask bit 20) adds stepDeg to the gun offset once per press and forces a resend
-    {
-        g_bodyOff = BodyOff{}; g_bodyOff.on = true; g_bodyOff.veh = V; g_bodyOff.body = 1; g_bodyOff.stepDeg = 0.05;
-        auto& sh = g_bodyShown[std::make_tuple(V, 1, (uint64_t)9)]; sh.have = true;
-        CHECK(!key_step(9, 1u << 3), "another key: nothing");
-        CHECK(key_step(9, (1u << 20) | (1u << 3)), "hotkey 6 pressed");
-        CHECK(!key_step(9, 1u << 20), "held: once per press");
-        CHECK(std::fabs(g_bodyOff.yawDeg - 0.05) < 1e-12 && !g_bodyShown[std::make_tuple(V, 1, (uint64_t)9)].have, "offset 0.05 and resend forced");
-        key_step(9, 0); key_step(9, 1u << 20);
-        double ang = 2.0 * std::atan2(g_bodyOff.ry, g_bodyOff.rw) * 180.0 / M_PI;
-        CHECK(std::fabs(g_bodyOff.yawDeg - 0.10) < 1e-12 && std::fabs(ang - 0.10) < 1e-9, "second press: 0.10 (rotation %f)", ang);
-        g_bodyOff.on = false; CHECK(!key_step(9, 0) && !key_step(9, 1u << 20), "off: nothing");
-        g_bodyOff = BodyOff{};
-    }
-
     // despawn forgets the tracks
     bodies_forget(V);
     CHECK(!has_bodies(V), "forgotten");

@@ -468,7 +468,7 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
                 off += L;
             }
             addon::expire_fakes(tick);                               // fake orders lapse when the addon feed stopped
-            if (g_relay || !relay::g_alias.empty() || !relay::g_releaseSnap.empty() || !relay::g_standby.empty() || relay::g_orbit.on || relay::g_bodyOff.on) {   // build the injected copy (alias / orbit work with relay off)
+            if (g_relay || !relay::g_alias.empty() || !relay::g_releaseSnap.empty() || !relay::g_standby.empty()) {   // build the injected copy (alias works with relay off)
                 int cap = (int)cub + relay::kMaxPerSend * relay::kMaxRecLen;
                 inj = static_cast<uint8_t*>(malloc(cap));
                 if (inj) {
@@ -573,12 +573,6 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                             int tn = (int)rec::U16(body, blen, off + 4);
                             on_chat_line(sid, body + off + 6, tn);
                             on_chat_cmd(sid, ps, body + off + 6, tn, now);
-                        }
-                        else if (body[off] == 0x64) {   // seat key state: u32 keyMask (experiment: hotkey 6 nudges the gun)
-                            uint32_t mask = rec::U32(body, blen, off + 4);
-                            if (relay::key_step(sid, mask))
-                                logf("== hotkey 6: gun offset veh=%u body=%d now %.3f deg (step %.3f) ==\n",
-                                     relay::g_bodyOff.veh, relay::g_bodyOff.body, relay::g_bodyOff.yawDeg, relay::g_bodyOff.stepDeg);
                         }
                         else if (body[off] == 0x34) {   // heartbeat: u32 clientTick · u32 0 · u32 clientTps · u32 framesBehind
                             ps.cliTick = rec::U32(body, blen, off + 4); ps.cliTps = rec::U32(body, blen, off + 12);
@@ -885,61 +879,6 @@ static std::string ipc_handle(const std::string& line) {
         w.kvb("ok", true).kv("nowMs", GetTickCount64()); write_peers(w);
     } else if (cmd == "vehicles.get") {
         w.kvb("ok", true).kv("nowMs", GetTickCount64()); write_vehicles(w);
-    } else if (cmd == "debug.clone") {
-        // experiment only: give vehicle `to` (e.g. a static fake that never gets a native 0x81) the
-        // record template of vehicle `from` (same design, non-static), with the vehicle id patched in.
-        double from = 0, to = 0;
-        json::get_num(line.c_str(), "from", from); json::get_num(line.c_str(), "to", to);
-        auto fit = relay::g_veh.find((uint32_t)from);
-        if (from <= 0 || to <= 0 || fit == relay::g_veh.end() || fit->second.len <= 0) {
-            w.kvb("ok", false).kv("error", "from has no record template");
-        } else {
-            relay::Veh copy = fit->second;
-            uint32_t tid = (uint32_t)to;
-            memcpy(copy.bytes + 4, &tid, 4);
-            copy.addonT = 0;
-            relay::g_veh[tid] = copy;
-            logf("== debug.clone template %u -> %u len=%d (ipc) ==\n", (unsigned)from, tid, copy.len);
-            w.kvb("ok", true).kv("from", (unsigned)from).kv("to", (unsigned)tid).kv("len", copy.len);
-        }
-    } else if (cmd == "debug.orbit") {
-        // experiment only (never on by default, not in the GUI): circle a vehicle by records alone
-        double veh = 0, en = 1, v;
-        json::get_num(line.c_str(), "veh", veh);
-        if (json::get_num(line.c_str(), "enabled", v)) en = v;
-        relay::Orbit o = relay::g_orbit;
-        o.on = en != 0 && veh > 0; o.veh = (uint32_t)veh;
-        if (json::get_num(line.c_str(), "x", v)) o.cx = v;
-        if (json::get_num(line.c_str(), "y", v)) o.cy = v;
-        if (json::get_num(line.c_str(), "z", v)) o.cz = v;
-        if (json::get_num(line.c_str(), "r", v) && v > 0) o.r = v;
-        if (json::get_num(line.c_str(), "period", v) && v >= 10) o.period = v;
-        relay::g_orbit = o;
-        logf("== debug.orbit veh=%u on=%d center=(%.1f,%.1f,%.1f) r=%.1f period=%.0f (ipc) ==\n",
-             o.veh, (int)o.on, o.cx, o.cy, o.cz, o.r, o.period);
-        w.kvb("ok", true).kvb("on", o.on).kv("veh", (unsigned)o.veh).kv("records", relay::g_orbitRecords);
-    } else if (cmd == "debug.bodyoff") {
-        // experiment only (never on by default, not in the GUI): shift one body of a vehicle in its 0x81
-        double veh = 0, en = 1, v;
-        json::get_num(line.c_str(), "veh", veh);
-        if (json::get_num(line.c_str(), "enabled", v)) en = v;
-        relay::BodyOff b = relay::g_bodyOff;
-        b.on = en != 0 && veh > 0; b.veh = (uint32_t)veh;
-        if (json::get_num(line.c_str(), "body", v)) b.body = (int)v;
-        if (json::get_num(line.c_str(), "dx", v)) b.dx = v;
-        if (json::get_num(line.c_str(), "dy", v)) b.dy = v;
-        if (json::get_num(line.c_str(), "dz", v)) b.dz = v;
-        if (json::get_num(line.c_str(), "rx", v)) b.rx = v;
-        if (json::get_num(line.c_str(), "ry", v)) b.ry = v;
-        if (json::get_num(line.c_str(), "rz", v)) b.rz = v;
-        if (json::get_num(line.c_str(), "rw", v)) b.rw = v;
-        if (json::get_num(line.c_str(), "stepDeg", v)) b.stepDeg = v;
-        if (json::get_num(line.c_str(), "yawDeg", v)) b.yawDeg = v;   // the offset the given rx..rw stand for
-        relay::g_bodyOff = b;
-        logf("== debug.bodyoff veh=%u on=%d body=%d d=(%.2f,%.2f,%.2f) (ipc) ==\n",
-             b.veh, (int)b.on, b.body, b.dx, b.dy, b.dz);
-        w.kvb("ok", true).kvb("on", b.on).kv("veh", (unsigned)b.veh).kv("body", b.body).kv("records", relay::g_bodyOffRecords)
-            .kv("yawDeg", b.yawDeg).kv("stepDeg", b.stepDeg).kv("keySteps", relay::g_keySteps);
     } else if (cmd == "addon.poses") {
         int fed = 0, n = addon::on_batch(line.c_str(), g_worldTick, fed);
         if (n < 0) w.kvb("ok", false).kv("error", "need tc and data[[id,x,y,z,qx,qy,qz,qw],...]");

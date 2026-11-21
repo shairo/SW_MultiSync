@@ -38,6 +38,7 @@ build.bat
 ## その他ドキュメント
 
 - [ipc-protocol.md](ipc-protocol.md) — 制御プレーン仕様
+- [webmap-連携.md](webmap-連携.md) — WebMap（アドオン・Bridge・MapViewer）との連携
 - [protocol.md](protocol.md) / [protocol/](protocol/) — 通信プロトコル解析
 
 ## 注意

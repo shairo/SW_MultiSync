@@ -351,24 +351,6 @@ inline void set_alias(const std::vector<std::pair<uint32_t, uint32_t>>& a) {
     g_alias = a;
 }
 
-// Debug orbit (IPC debug.orbit, experiments only, off by default): show vehicle `veh` to every client
-// circling (cx, cy, cz) at radius r, one turn per `period` ticks, by rewriting / appending its 0x81
-// with a pose on the circle. Used to check whether a static vehicle can be moved by records alone.
-struct Orbit { bool on = false; uint32_t veh = 0; double cx = 0, cy = 0, cz = 0, r = 20, period = 300; };
-inline Orbit g_orbit;
-inline uint64_t g_orbitRecords = 0;
-
-// Debug body offset (IPC debug.bodyoff, experiments only, off by default): add (dx, dy, dz) to body
-// `body` (file order) of vehicle `veh` in every 0x81 sent to clients. A type-2 body is moved in the
-// type-1 body's local axes (its float pos), a type-1 body in world axes (its double pos). A type-0
-// body (no change) is left alone, so the client keeps the last pose it was sent.
-// The body's rotation is pre-multiplied by (rx, ry, rz, rw) — in the same frame as its pos (identity = no turn).
-struct BodyOff { bool on = false; uint32_t veh = 0; int body = 0; double dx = 0, dy = 0, dz = 0;
-                 double rx = 0, ry = 0, rz = 0, rw = 1;
-                 double stepDeg = 0.05, yawDeg = 0; };   // seat hotkey 6 adds stepDeg about body0 y (key_step)
-inline BodyOff g_bodyOff;
-inline uint64_t g_bodyOffRecords = 0;
-
 // Called for every native body0 sample (addon.h uses it to find the addon's tick offset). May be null.
 inline void (*g_onNative)(uint32_t veh, uint32_t tick, double x, double y, double z) = nullptr;
 
@@ -1064,8 +1046,6 @@ inline bool budget_ok(uint64_t peer, uint32_t tick, int addLen) {
 // (dead-reckon on the old sample). Patches total (+4) and recordCount (body+16). Returns the new
 // cub if ANYTHING changed, else 0.
 inline int alias_pass(uint64_t peer, uint8_t* out, int& wpos, int outcap, int recCount, uint32_t tick, int& added, int& addedBytes);
-inline int orbit_pass(uint8_t* out, int& wpos, int outcap, int recCount, uint32_t tick, int& added, int& addedBytes);
-inline int bodyoff_pass(uint8_t* out, int wpos, int recCount);
 inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* out, int outcap, uint32_t tick, bool relayOn = true) {
     // Rewound-world-tick guard: never modify a message whose world tick is not newer than the last
     // one we injected into for this recipient. A server rewind / resend of an older tick must pass
@@ -1162,8 +1142,6 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
     int nearN = relayOn ? bodynear_pass(peer, out, wpos, outcap, count, count + added, tick, handled) : 0;   // near clients: nudged guns
     addedBytes += wpos - nearWpos;                                                              // grown records, same count
     int aliased = (g_alias.empty() && g_releaseSnap.empty() && g_standby.empty()) ? 0 : alias_pass(peer, out, wpos, outcap, count + added, tick, added, addedBytes);
-    if (g_orbit.on) aliased += orbit_pass(out, wpos, outcap, count + added, tick, added, addedBytes);
-    if (g_bodyOff.on) aliased += bodyoff_pass(out, wpos, count + added);
     if (rewrote == 0 && added == 0 && aliased == 0 && nearN == 0) return 0;
     if (addedBytes > 0) { uint32_t total; memcpy(&total, out + 4, 4); total += addedBytes; memcpy(out + 4, &total, 4); }
     if (added > 0) { uint32_t rc; memcpy(&rc, out + 24, 4); rc += added; memcpy(out + 24, &rc, 4); }
@@ -1292,102 +1270,6 @@ inline int alias_pass(uint64_t peer, uint8_t* out, int& wpos, int outcap, int re
     }
     g_aliasRecords += written;
     return written;
-}
-
-// debug.orbit: every message to every peer carries `veh` at its circle position at ETA = tick + 4 (the
-// client glides there, so it moves continuously). Rewrites veh's own record if present, else appends one
-// from its template. Returns the number of records written.
-inline int orbit_pass(uint8_t* out, int& wpos, int outcap, int recCount, uint32_t tick, int& added, int& addedBytes) {
-    uint8_t* body = out + 8; int blen = wpos - 8;
-    uint32_t eta = tick + 4;
-    double a = 2.0 * 3.14159265358979 * std::fmod((double)eta, g_orbit.period) / g_orbit.period;
-    double px = g_orbit.cx + g_orbit.r * std::cos(a), py = g_orbit.cy, pz = g_orbit.cz + g_orbit.r * std::sin(a);
-    auto put = [&](uint8_t* r) {
-        memcpy(r + 8, &eta, 4);
-        WF(r + 15, 0); WF(r + 19, 0); WF(r + 23, 0); WF(r + 27, 1);   // identity rotation
-        W(r + 31, px); W(r + 39, py); W(r + 47, pz);
-    };
-    for (int i = 0, off = 20; i < recCount && off < blen; i++) {
-        int L = rec::decode_len(body, blen, off);
-        if (L <= 0) break;
-        if (rec::U32(body, blen, off) == 0x81 && rec::U32(body, blen, off + 4) == g_orbit.veh
-            && off + 31 + 24 <= blen && body[off + 14] == 1) { put(body + off); g_orbitRecords++; return 1; }
-        off += L;
-    }
-    auto vit = g_veh.find(g_orbit.veh);
-    if (vit == g_veh.end() || vit->second.len <= 0) return 0;                   // no template yet
-    const Veh& v = vit->second;
-    if (v.bytes[14] != 1 || v.len < 31 + 24 || wpos + v.len > outcap || added >= kMaxPerSend) return 0;
-    memcpy(out + wpos, v.bytes, v.len);
-    put(out + wpos);
-    wpos += v.len; addedBytes += v.len; added++;
-    g_orbitRecords++;
-    return 1;
-}
-
-// debug.bodyoff: shift one body of one vehicle in every 0x81 of this message. Lengths never change.
-inline int bodyoff_pass(uint8_t* out, int wpos, int recCount) {
-    uint8_t* body = out + 8; int blen = wpos - 8, n = 0;
-    for (int i = 0, off = 20; i < recCount && off < blen; i++) {
-        int L = rec::decode_len(body, blen, off);
-        if (L <= 0) break;
-        if (rec::U32(body, blen, off) == 0x81 && rec::U32(body, blen, off + 4) == g_bodyOff.veh && off + 14 <= blen) {
-            int cnt = (int)rec::U16(body, blen, off + 12), p = off + 14, end = off + L;
-            for (int bi = 0; bi < cnt && p < end; bi++) {
-                int t = body[p];
-                int dl = t == 0 ? 0 : t == 1 ? 40 : t == 2 ? 28 : -1;
-                if (dl < 0 || p + 1 + dl > end) break;
-                if (bi == g_bodyOff.body) {
-                    if (t == 1 || t == 2) {                              // rotation: q' = r * q (x, y, z, w)
-                        const BodyOff& o = g_bodyOff;
-                        double x = F(body + p + 1), y = F(body + p + 5), z = F(body + p + 9), w = F(body + p + 13);
-                        double nx = o.rw * x + o.rx * w + o.ry * z - o.rz * y;
-                        double ny = o.rw * y - o.rx * z + o.ry * w + o.rz * x;
-                        double nz = o.rw * z + o.rx * y - o.ry * x + o.rz * w;
-                        double nw = o.rw * w - o.rx * x - o.ry * y - o.rz * z;
-                        WF(body + p + 1, (float)nx); WF(body + p + 5, (float)ny); WF(body + p + 9, (float)nz); WF(body + p + 13, (float)nw);
-                    }
-                    if (t == 2) {
-                        WF(body + p + 17, F(body + p + 17) + (float)g_bodyOff.dx);
-                        WF(body + p + 21, F(body + p + 21) + (float)g_bodyOff.dy);
-                        WF(body + p + 25, F(body + p + 25) + (float)g_bodyOff.dz);
-                        n++;
-                    } else if (t == 1) {
-                        W(body + p + 17, D(body + p + 17) + g_bodyOff.dx);
-                        W(body + p + 25, D(body + p + 25) + g_bodyOff.dy);
-                        W(body + p + 33, D(body + p + 33) + g_bodyOff.dz);
-                        n++;
-                    }
-                    break;
-                }
-                p += 1 + dl;
-            }
-        }
-        off += L;
-    }
-    g_bodyOffRecords += n;
-    return n;
-}
-
-// Experiment (2026-11-21): does a client draw a gun nudged by a few hundredths of a degree? While debug.bodyoff
-// is on, every press of seat hotkey 6 (client 0x64 keyMask bit 20, protocol/client.md) by any player adds
-// stepDeg to the offset (about the body0 y axis) and makes the next record to every client carry that body
-// as type 2 (bodynear_pass sees "not shown" and writes the true pose; bodyoff_pass then rotates it).
-// Returns true when a press was taken.
-constexpr uint32_t kHotkey6 = 1u << 20;
-inline std::map<uint64_t, uint32_t> g_keyMask;
-inline uint64_t g_keySteps = 0;
-inline bool key_step(uint64_t peer, uint32_t mask) {
-    uint32_t prev = g_keyMask[peer]; g_keyMask[peer] = mask;
-    if (!(mask & kHotkey6) || (prev & kHotkey6) || !g_bodyOff.on || g_bodyOff.body < 1) return false;
-    BodyOff& o = g_bodyOff;
-    o.yawDeg += o.stepDeg;
-    double h = o.yawDeg * 3.14159265358979323846 / 180.0 / 2.0;
-    o.rx = 0; o.ry = std::sin(h); o.rz = 0; o.rw = std::cos(h);
-    for (auto it = g_bodyShown.lower_bound(std::make_tuple(o.veh, o.body, (uint64_t)0));
-         it != g_bodyShown.end() && std::get<0>(it->first) == o.veh && std::get<1>(it->first) == o.body; ++it) it->second.have = false;
-    g_keySteps++;
-    return true;
 }
 
 } // namespace relay
