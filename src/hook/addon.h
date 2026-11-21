@@ -201,6 +201,27 @@ inline void retry_pending() {
 
 inline void install() { relay::g_onNative = &on_native; }
 
+// IPC `addon.kinds` (Bridge, from the MapViewer vehicle_kinds): {"cmd":"addon.kinds","Missile":[id,...],"Ship":[...],
+// "Tank":[...],"SubMarine":[...],"AirCraft":[...]}. Replaces the whole list; vehicles in none of them are Other.
+// Returns the number of ids read.
+inline int on_kinds(const char* line) {
+    std::unordered_map<uint32_t, uint8_t> kinds;
+    int n = 0;
+    for (int k = relay::kKindMissile; k < relay::kKindCount; k++) {
+        const char* p = json::find_value(line, relay::kKindNames[k]);
+        if (!p || *p != '[') continue;
+        json::for_each_elem(p, [&](const char* e) {
+            double v = strtod(e, nullptr);
+            if (v >= 0 && v <= 4294967295.0) { kinds[(uint32_t)v] = (uint8_t)k; n++; }
+        });
+    }
+    relay::g_kindOf.swap(kinds);
+    relay::g_kindsKnown = true;
+    relay::g_kindUpdates++;
+    relay::kind_sweep(true);
+    return n;
+}
+
 // IPC `addon.poses`: {"cmd":"addon.poses","ep":E,"tc":N,"data":[[id,x,y,z,qx,qy,qz,qw],...]} ("ep" optional).
 // Returns the number of records parsed (fed or not); `fed` counts those handed to the relay.
 inline int on_batch(const char* line, uint32_t nowTick, int& fedOut) {
@@ -223,6 +244,7 @@ inline int on_batch(const char* line, uint32_t nowTick, int& fedOut) {
     if (json::get_num(line, "fl", fl) && fl == 0 && nowTick > 0) add_arrival((int64_t)nowTick - (int64_t)tc);
     else g_arrSkipped++;
     int parsed = 0;
+    relay::kind_sweep(false);                                   // a kind switched off since the last batch
     json::for_each_elem(data, [&](const char* e) {
         double v[8];
         if (*e != '[' || json::arr_nums(e, v, 8) != 8) { g_bad++; return; }
@@ -234,6 +256,7 @@ inline int on_batch(const char* line, uint32_t nowTick, int& fedOut) {
         h.s[h.head] = Sample{ tc, v[1], v[2], v[3] };
         h.head = (h.head + 1) % kRing; if (h.n < kRing) h.n++;
         if (!g_kKnown || !relay::g_cfg.addonPoses) return;
+        if (!relay::addon_kind_on(V)) { relay::g_kindSkipped++; return; }   // kind switched off (sync-kind-select.md)
         int64_t t = (int64_t)tc + g_k;
         if (t <= 0 || t > (int64_t)nowTick + 60) return;        // nonsense offset: wait for new votes
         float q[4] = { (float)v[4], (float)v[5], (float)v[6], (float)v[7] };

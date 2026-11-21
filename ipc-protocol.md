@@ -28,6 +28,7 @@ tool; the bundled GUI / `swctl` use exactly this and nothing else.
 | `peers.get` | – | `nowMs`, `peers[]` |
 | `vehicles.get` | – | `nowMs`, `vehicles[]` |
 | `addon.poses` | `tc` (addon tick), `data[[id,x,y,z,qx,qy,qz,qw],...]`; optional `ep` (addon generation), `fl` (requests in flight when sent), `bp[[id,body,x,y,z,qx,qy,qz,qw],...]`, `al[[fake,target],...]`, `fk[fake,...]`, `pk[[fake,ship],...]` | `records` (parsed), `fed` (handed to the relay), `offsetKnown`, `offset` — vehicle poses from the WebMap addon, sent by WebMapBridge for every vpos it accepts. See `webmap-連携.md` for what each field does |
+| `addon.kinds` | `Missile` `Ship` `Tank` `SubMarine` `AirCraft` (arrays of vehicle ids) | `vehicles` (ids read) — the MapViewer Type of each vehicle, relayed by WebMapBridge (on change, every 30 s and on every IPC connect). Replaces the whole list; a vehicle in none of them is Other. Gates the addon → body0 source per kind (`addonMissile` `addonShip` `addonTank` `addonSub` `addonAir` `addonOther`); until the first one arrives every vehicle is fed |
 | `relay.set` | `enabled` bool | `relay`, `mutate` |
 | `mutate.set` | `enabled` bool | (debug: X+50 offset demo) |
 | `capture.start` | – | `captureFile` (rolls a new .swcap) |
@@ -57,6 +58,7 @@ captureBytes logFile walkFailFile ipcPort ipcClients ipcRequests peerCount vehic
 - feed counters: `lastTc batches samples fed bad votes resets staleBatches` (same-ep batches whose `tc` went back)
   `epChanges` (new addon generations) `fakeExpired` (fake orders dropped after `stale` ticks without a batch)
 - fake_missile orders: `alias[[fake,target],...] aliasRecords aliasSnaps aliasCacheStarts parked parkRecords standby standbyRecords`
+- per-kind gate (`addon.kinds`): `kindsKnown` (a list has arrived) `kindUpdates` `kindVehicles` (ids in the list) `kindSkipped` (addon samples not used because the kind is off) `kindDropped` (addon-fed vehicles sent back to native when their kind was turned off)
 - `bodies{…}` — turret / gun sync (prototype): `sync` (= `bodySync`), `tracks samples measured writes built checks
   pending pendingDropped rejected resets errPosAvg errAngAvg errPosMax errAngMax near`;
   `list[{veh body offKnown offX offY offZ measured errPos errAng okRun missRun rejected resets lastT}]` (up to 64),

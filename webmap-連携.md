@@ -70,7 +70,7 @@ SW_MultiSync 側は `dllmain.cpp` の IPC が `addon::on_batch`（`addon.h`）�
 
 1. `ep` が前回と違えば K を忘れてやり直す（`epChanges` を数える）。同じ `ep` で `tc` が戻った束は捨てる（`staleBatches`）。
 2. `fl == 0` なら「今の世界の tick − `tc`」を K の候補にする（arrival）。
-3. `data` の各車両を車両ごとのリング（24 件）に入れる。K が決まっていて `addonPoses=1`（既定）なら、`relay::observe_addon` で中継の情報源にする。
+3. `data` の各車両を車両ごとのリング（24 件）に入れる。K が決まっていて `addonPoses=1`（既定）で、その車両の種類のチェックが入っていれば（下の「種類ごとの切り替え」）、`relay::observe_addon` で中継の情報源にする。
 4. 自分の 0x81 と `data` の位置を突き合わせても K を確かめる（matched。動いている車両が要る）。arrival と食い違えば matched を使う。
 5. `bp` は K が決まってからだけ `relay::body_sample` に入れる。
 6. `fk`・`al`・`pk` で fake_missile の待機・追従の一覧を置き換える。アドオンの送信が `stale` tick（既定 300）途絶えたら一覧を捨てる。
@@ -125,7 +125,7 @@ SW_MultiSync が居なければ何も載せません（`WEBMAP_SWHOOK_LAG=0` で
 
 ### 誰に効くか
 
-- `swhook.ini` / `config.set` の `bodySync` が全体のスイッチです（既定 0）。
+- `swhook.ini` / `config.set` の `bodySync` が全体のスイッチです（既定 1。管理者が止めたいときに 0 にする。GUI の「WebMap」タブのチェック）。
 - そのうえで、プレイヤーごとにゲームのチャットで切り替えます（既定 OFF、保存しません）。
 
 | チャット | 動き |
@@ -136,6 +136,27 @@ SW_MultiSync が居なければ何も載せません（`WEBMAP_SWHOOK_LAG=0` で
 
 `swctl status` の `addon.bodies` に、追っている body の一覧（`list`）・見せた向き（`view`・`shown`）・ON の人（`players`）が出ます。
 
+## 種類ごとの切り替え
+
+アドオンの位置で body0 を書き換えるかを、車両の種類ごとに選べます。種類は MapViewer の Type です。
+
+- MapViewer は種類ごとの車両 ID を `vehicle_kinds` で Bridge に送ります（変わったときと 30 秒ごと）。Bridge は `{"cmd":"addon.kinds","Missile":[...],"Ship":[...],"Tank":[...],"SubMarine":[...],"AirCraft":[...]}` を SW_MultiSync に送ります。最後の一覧を覚えておき、つなぎ直すたびに送り直します。アドオンへは送りません。
+- SW_MultiSync は一覧を丸ごと置き換えます。どの一覧にも無い車両は「そのほか」です。
+- 一覧が一度も届いていないあいだ（MapViewer が古いときなど）は、種類によらず全部の車両に使います。
+- チェックを外すと、その種類でアドオンから来ていた車両の位置をすぐ捨て、次の 0x81 からゲームサーバーの記録に戻します（`kindDropped`）。
+- 絞るのはアドオン → body0 の経路だけです。ほかのプレイヤーの細かい記録から作る中継、K を決めるための記録、`bp`（砲塔・砲）は絞りません。
+
+| 種類 | 設定 | 既定 |
+|---|---|---|
+| ミサイル（Missile） | `addonMissile` | 1 |
+| 船（Ship） | `addonShip` | 0 |
+| 戦車（Tank） | `addonTank` | 0（車体だけ。砲塔・砲は `bodySync`） |
+| 潜水艦（SubMarine） | `addonSub` | 0 |
+| 航空機（AirCraft） | `addonAir` | 0 |
+| そのほか（Torpedo・Bullet・Type なし） | `addonOther` | 0 |
+
+ミサイル以外は、まだ確かめていないので既定で外しています。GUI の「WebMap」タブで切り替えられます（その場で効き、「設定」タブの「iniに保存」で残ります）。経緯は Stormworks_WebMap の `docs/progress/sync-kind-select.md` にあります。
+
 ## 関係するコマンド・設定
 
 | 場所 | 名前 | 意味 |
@@ -145,6 +166,7 @@ SW_MultiSync が居なければ何も載せません（`WEBMAP_SWHOOK_LAG=0` で
 | Bridge | `WEBMAP_SWHOOK_LAG=0` | `peers.get` を読まない |
 | Bridge | `WEBMAP_SWHOOK_PORT` | SW_MultiSync の IPC のポート（既定 28215） |
 | SW_MultiSync | `addonPoses` | 1 = アドオンの姿勢を中継に使う（既定 1） |
-| SW_MultiSync | `bodySync` | 1 = 砲塔・砲の書き換えを許す（既定 0） |
+| SW_MultiSync | `addonMissile` `addonShip` `addonTank` `addonSub` `addonAir` `addonOther` | 1 = その種類にアドオンの姿勢を使う（既定はミサイルだけ 1） |
+| SW_MultiSync | `bodySync` | 1 = 砲塔・砲の書き換えを許す（既定 1。全員分のスイッチ） |
 | SW_MultiSync | `stale` | アドオンの情報が途絶えてから、ゲームサーバーの記録に戻すまでの tick（既定 300） |
 | SW_MultiSync | `ipcPort` | IPC のポート（既定 28215。起動時だけ読む） |

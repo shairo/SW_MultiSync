@@ -680,6 +680,9 @@ static void write_status(json::JsonW& w) {
         .kv("aliasCacheStarts", relay::g_aliasCacheStarts)
         .kv("parked", (uint64_t)relay::g_park.size())
         .kv("parkRecords", relay::g_parkRecords)
+        .kvb("kindsKnown", relay::g_kindsKnown).kv("kindUpdates", relay::g_kindUpdates)
+        .kv("kindSkipped", relay::g_kindSkipped).kv("kindDropped", relay::g_kindDropped)
+        .kv("kindVehicles", (unsigned)relay::g_kindOf.size())
         .kv("standby", (unsigned)relay::g_standby.size())
         .kv("standbyRecords", relay::g_standbyRecords);
     w.key("alias").arr();
@@ -883,6 +886,9 @@ static std::string ipc_handle(const std::string& line) {
         int fed = 0, n = addon::on_batch(line.c_str(), g_worldTick, fed);
         if (n < 0) w.kvb("ok", false).kv("error", "need tc and data[[id,x,y,z,qx,qy,qz,qw],...]");
         else w.kvb("ok", true).kv("records", n).kv("fed", fed).kvb("offsetKnown", addon::g_kKnown).kv("offset", addon::g_k);
+    } else if (cmd == "addon.kinds") {
+        int n = addon::on_kinds(line.c_str());
+        w.kvb("ok", true).kv("vehicles", n);
     } else if (cmd == "relay.set" || cmd == "mutate.set") {
         bool en;
         if (!json::get_bool(line.c_str(), "enabled", en)) { w.kvb("ok", false).kv("error", "missing enabled"); }

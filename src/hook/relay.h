@@ -77,8 +77,17 @@ struct Cfg {
     int    freezeDefMs  = 3000;   // a pushed vehicle definition unacknowledged (no 0x29) this long
     // addon pose source (addon.h): body0 poses of every vehicle from the Stormworks addon over IPC
     int    addonPoses   = 1;      // 1 = use addon.poses samples as a relay source (once the tick offset is known)
+    // per-kind gate on the addon body0 source (Stormworks_WebMap docs/progress/sync-kind-select.md). The kind comes from
+    // the MapViewer Type (IPC addon.kinds via the Bridge); until the first addon.kinds arrives every vehicle is fed as before.
+    int    addonMissile = 1;      // 1 = feed Missile vehicles from the addon (single body: safe)
+    int    addonShip    = 0;      // 1 = feed Ship vehicles (not verified yet)
+    int    addonTank    = 0;      // 1 = feed Tank vehicles' body0 (not verified yet; turret/gun sync is bodySync)
+    int    addonSub     = 0;      // 1 = feed SubMarine vehicles (not verified yet)
+    int    addonAir     = 0;      // 1 = feed AirCraft vehicles (not verified yet)
+    int    addonOther   = 0;      // 1 = feed vehicles of any other / no Type (Torpedo, Bullet, untyped)
     // non-root body poses (prototype, docs: Stormworks_WebMap docs/progress/turret-sync.md): addon.poses "bp"
-    int    bodySync     = 0;      // 1 = rewrite type-2 bodies (turret, gun) of relayed 0x81 from the addon's body poses
+    int    bodySync     = 1;      // 1 = rewrite type-2 bodies (turret, gun) of relayed 0x81 from the addon's body poses
+                                  //     (master switch for everyone; each player still opts in with ?bs on)
 };
 inline Cfg g_cfg;
 
@@ -116,7 +125,13 @@ inline const CfgField kCfgFields[] = {
     {"freezePoseMs",    true,  &Cfg::freezePoseMs,    nullptr, false, "freeze detector: pose static this long while its vehicle moves (ms, 0 = off)"},
     {"freezeDefMs",     true,  &Cfg::freezeDefMs,     nullptr, false, "freeze detector: pushed vehicle definition unacked this long (ms, 0 = off)"},
     {"addonPoses",      true,  &Cfg::addonPoses,      nullptr, false, "1 = use vehicle poses sent by the addon (IPC addon.poses) as a relay source"},
-    {"bodySync",        true,  &Cfg::bodySync,        nullptr, false, "1 = rewrite turret/gun bodies (type 2) of relayed 0x81 from the addon body poses (prototype)"},
+    {"addonMissile",    true,  &Cfg::addonMissile,    nullptr, false, "1 = use the addon poses for Missile vehicles (MapViewer Type)"},
+    {"addonShip",       true,  &Cfg::addonShip,       nullptr, false, "1 = use the addon poses for Ship vehicles"},
+    {"addonTank",       true,  &Cfg::addonTank,       nullptr, false, "1 = use the addon poses for Tank vehicles (body0; turrets are bodySync)"},
+    {"addonSub",        true,  &Cfg::addonSub,        nullptr, false, "1 = use the addon poses for SubMarine vehicles"},
+    {"addonAir",        true,  &Cfg::addonAir,        nullptr, false, "1 = use the addon poses for AirCraft vehicles"},
+    {"addonOther",      true,  &Cfg::addonOther,      nullptr, false, "1 = use the addon poses for vehicles of any other or no Type"},
+    {"bodySync",        true,  &Cfg::bodySync,        nullptr, false, "1 = rewrite turret/gun bodies (type 2) of relayed 0x81 from the addon body poses (master switch; players opt in with ?bs on)"},
 };
 constexpr int kCfgFieldCount = (int)(sizeof(kCfgFields) / sizeof(kCfgFields[0]));
 
@@ -470,6 +485,49 @@ inline void prune_addon_only(uint32_t nowTick) {
         const Veh& v = it->second;
         if (v.len <= 0 && v.addonT != 0 && nowTick > v.curT + (uint32_t)g_cfg.stale) it = g_veh.erase(it);
         else ++it;
+    }
+}
+
+// ---- per-kind gate on the addon source (Stormworks_WebMap docs/progress/sync-kind-select.md) ----
+// IPC addon.kinds (MapViewer Type → Bridge) says which vehicles are which kind. Only the addon → body0 path is
+// gated: relay from native samples, the tick-offset history and the turret / gun "bp" are not.
+enum Kind : uint8_t { kKindOther = 0, kKindMissile, kKindShip, kKindTank, kKindSub, kKindAir, kKindCount };
+inline const char* const kKindNames[kKindCount] = { "Other", "Missile", "Ship", "Tank", "SubMarine", "AirCraft" };
+inline std::unordered_map<uint32_t, uint8_t> g_kindOf;   // vehId -> Kind (absent = Other)
+inline bool     g_kindsKnown = false;                    // false until the first addon.kinds: every kind is fed
+inline uint64_t g_kindUpdates = 0, g_kindSkipped = 0, g_kindDropped = 0;
+inline int      g_kindGateSig = -1;                      // gate settings last swept (see kind_sweep)
+inline bool kind_on(uint8_t k) {
+    switch (k) {
+    case kKindMissile: return g_cfg.addonMissile != 0;
+    case kKindShip:    return g_cfg.addonShip != 0;
+    case kKindTank:    return g_cfg.addonTank != 0;
+    case kKindSub:     return g_cfg.addonSub != 0;
+    case kKindAir:     return g_cfg.addonAir != 0;
+    default:           return g_cfg.addonOther != 0;
+    }
+}
+inline uint8_t kind_of(uint32_t V) { auto it = g_kindOf.find(V); return it == g_kindOf.end() ? (uint8_t)kKindOther : it->second; }
+inline bool addon_kind_on(uint32_t V) { return !g_kindsKnown || kind_on(kind_of(V)); }
+inline int kind_gate_sig() {
+    int s = g_kindsKnown ? 1 : 0;
+    for (int k = 0; k < kKindCount; k++) s |= (kind_on((uint8_t)k) ? 1 : 0) << (k + 1);
+    return s;
+}
+// When a kind is switched off (or a vehicle's kind changes to one that is off), forget the addon-fed pose at
+// once so the vehicle goes back to native at the next 0x81 instead of dead-reckoning the old addon samples
+// until `stale`. Cheap: runs only when the gate settings or the kind list changed.
+inline void kind_sweep(bool kindsChanged) {
+    int sig = kind_gate_sig();
+    if (!kindsChanged && sig == g_kindGateSig) return;
+    g_kindGateSig = sig;
+    for (auto it = g_veh.begin(); it != g_veh.end();) {
+        Veh& v = it->second;
+        if (v.addonT == 0 || addon_kind_on(it->first)) { ++it; continue; }
+        g_kindDropped++;
+        if (v.len <= 0) { it = g_veh.erase(it); continue; }      // addon-only (no native template yet)
+        v.has = false; v.addonT = 0; v.prevT = 0; v.srcGap = 0; // keep the template; the next 0x81 refills it
+        ++it;
     }
 }
 
