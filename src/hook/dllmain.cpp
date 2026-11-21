@@ -331,9 +331,13 @@ static void on_multisync(uint64_t sid) {
 }
 // `?bs` shows, `?bs on` / `?bs off` sets the turret / gun rewrite for that player alone (2026-11-21; default off).
 // The reply goes to that player alone. Live only (not saved): a re-inject turns everyone off again.
-static void on_bs(uint64_t sid, int set) {   // set: -1 = show, 0 = off, 1 = on
+// Shared by the chat command and IPC `bodysync.peer` (control plane: every runtime switch is reachable over IPC).
+static void set_body_peer(uint64_t sid, int set) {
     if (set == 1) relay::g_bodyPeers.insert(sid);
     else if (set == 0) relay::g_bodyPeers.erase(sid);
+}
+static void on_bs(uint64_t sid, int set) {   // set: -1 = show, 0 = off, 1 = on
+    set_body_peer(sid, set);
     char msg[96]; _snprintf_s(msg, _TRUNCATE, "bs (turret / gun sync for you): %s", bs_state(sid));
     tell_player(sid, msg, "bs");
     logf("== bs: peer=%llu %s -> %d (players on %zu) ==\n", (unsigned long long)sid, set < 0 ? "show" : "set",
@@ -886,6 +890,21 @@ static std::string ipc_handle(const std::string& line) {
         int fed = 0, n = addon::on_batch(line.c_str(), g_worldTick, fed);
         if (n < 0) w.kvb("ok", false).kv("error", "need tc and data[[id,x,y,z,qx,qy,qz,qw],...]");
         else w.kvb("ok", true).kv("records", n).kv("fed", fed).kvb("offsetKnown", addon::g_kKnown).kv("offset", addon::g_k);
+    } else if (cmd == "bodysync.peer") {
+        // per-player turret / gun sync (same as that player's ?bs on / ?bs off); without "enabled" it only reports
+        std::string ps; double pd = 0; uint64_t sid = 0;
+        if (json::get_str(line.c_str(), "peer", ps)) sid = _strtoui64(ps.c_str(), nullptr, 10);
+        else if (json::get_num(line.c_str(), "peer", pd) && pd > 0) sid = (uint64_t)pd;
+        bool en;
+        if (!sid) w.kvb("ok", false).kv("error", "need peer (SteamID64)");
+        else {
+            if (json::get_bool(line.c_str(), "enabled", en)) {
+                set_body_peer(sid, en ? 1 : 0);
+                logf("== bs: peer=%llu set -> %d (ipc) ==\n", (unsigned long long)sid, en ? 1 : 0);
+            }
+            w.kvb("ok", true).kv("peer", std::to_string(sid)).kvb("enabled", relay::g_bodyPeers.count(sid) > 0)
+             .kvb("bodySync", relay::g_cfg.bodySync != 0);
+        }
     } else if (cmd == "addon.kinds") {
         int n = addon::on_kinds(line.c_str());
         w.kvb("ok", true).kv("vehicles", n);
@@ -923,11 +942,13 @@ static std::string ipc_handle(const std::string& line) {
         else {
             const relay::CfgField* f = relay::find_field(key.c_str());
             double eff = f ? relay::get_cfg(*f) : val;
+            relay::kind_sweep(false);                     // addonPoses / a kind turned off: drop addon-fed poses now
             logf("== config.set %s=%g (ipc) ==\n", key.c_str(), eff); logflush();
             w.kvb("ok", true).kv("key", key).kv("value", eff).kvb("startupOnly", f ? f->startupOnly : false);
         }
     } else if (cmd == "config.reload") {
         int n = load_relay_config();
+        relay::kind_sweep(false);
         w.kvb("ok", n >= 0).kv("keys", n); write_config(w);
         if (n < 0) w.kv("error", "swhook.ini not found");
     } else if (cmd == "debug.hold" || cmd == "debug.release") {

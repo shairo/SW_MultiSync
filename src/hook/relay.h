@@ -509,12 +509,13 @@ inline bool kind_on(uint8_t k) {
 }
 inline uint8_t kind_of(uint32_t V) { auto it = g_kindOf.find(V); return it == g_kindOf.end() ? (uint8_t)kKindOther : it->second; }
 inline bool addon_kind_on(uint32_t V) { return !g_kindsKnown || kind_on(kind_of(V)); }
+inline bool addon_source_on(uint32_t V) { return g_cfg.addonPoses && addon_kind_on(V); }   // master switch + kind
 inline int kind_gate_sig() {
-    int s = g_kindsKnown ? 1 : 0;
+    int s = (g_kindsKnown ? 1 : 0) | (g_cfg.addonPoses ? 1 << 10 : 0);
     for (int k = 0; k < kKindCount; k++) s |= (kind_on((uint8_t)k) ? 1 : 0) << (k + 1);
     return s;
 }
-// When a kind is switched off (or a vehicle's kind changes to one that is off), forget the addon-fed pose at
+// When a kind or the addonPoses master switch is turned off (or a vehicle's kind changes to one that is off), forget the addon-fed pose at
 // once so the vehicle goes back to native at the next 0x81 instead of dead-reckoning the old addon samples
 // until `stale`. Cheap: runs only when the gate settings or the kind list changed.
 inline void kind_sweep(bool kindsChanged) {
@@ -523,7 +524,7 @@ inline void kind_sweep(bool kindsChanged) {
     g_kindGateSig = sig;
     for (auto it = g_veh.begin(); it != g_veh.end();) {
         Veh& v = it->second;
-        if (v.addonT == 0 || addon_kind_on(it->first)) { ++it; continue; }
+        if (v.addonT == 0 || addon_source_on(it->first)) { ++it; continue; }
         g_kindDropped++;
         if (v.len <= 0) { it = g_veh.erase(it); continue; }      // addon-only (no native template yet)
         v.has = false; v.addonT = 0; v.prevT = 0; v.srcGap = 0; // keep the template; the next 0x81 refills it
@@ -1185,10 +1186,11 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
         if (added >= g_cfg.maxPerSend) break;
         uint32_t V = c.second; const Veh& v = g_veh[V];
         if (wpos + v.len > outcap) continue;
-        if (!budget_ok(peer, tick, v.len)) continue;                    // per-recipient cap: skip (coarsen)
-        uint32_t eta, target; promise_of(v, peer, V, tick, eta, target);
-        int len = bodyOn ? body_build(out + wpos, outcap - wpos, v.bytes, v.len, V, tick) : 0;   // turret / gun slots (prototype)
+        // build first, then charge the final length: body_build can grow type-0 slots (turret / gun, prototype)
+        int len = bodyOn ? body_build(out + wpos, outcap - wpos, v.bytes, v.len, V, tick) : 0;
         if (len <= 0) { memcpy(out + wpos, v.bytes, v.len); len = v.len; }
+        if (!budget_ok(peer, tick, len)) continue;                      // per-recipient cap: skip (coarsen); the copy is overwritten
+        uint32_t eta, target; promise_of(v, peer, V, tick, eta, target);
         memcpy(out + wpos + 8, &eta, 4);
         fill_pose(out + wpos, len, v, target);
         if (bodyOn) body_fill(out + wpos, len, V, target, tick);
@@ -1220,7 +1222,7 @@ inline int alias_pass(uint64_t peer, uint8_t* out, int& wpos, int outcap, int re
             if (L <= 0) break;
             if (rec::U32(body, blen, off) == 0x81 && off + 12 <= blen && body[off + 14] == 1) {
                 auto key = std::make_pair(peer, rec::U32(body, blen, off + 4));
-                if (g_releaseSnap.count(key)) { memcpy(body + off + 8, &tick, 4); g_releaseSnap.erase(key); g_aliasSnaps++; }
+                if (g_releaseSnap.count(key)) { memcpy(body + off + 8, &tick, 4); g_releaseSnap.erase(key); g_aliasSnaps++; written++; }
             }
             off += L;
         }

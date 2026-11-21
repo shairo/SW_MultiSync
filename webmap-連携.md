@@ -134,6 +134,8 @@ SW_MultiSync が居なければ何も載せません（`WEBMAP_SWHOOK_LAG=0` で
 | `?bs on` | 自分に届く記録だけ、全 Tank の砲塔・砲を書き換える |
 | `?bs off` | 自分の分を止める |
 
+IPC の `bodysync.peer`（`peer`・`enabled`）でも、チャットの `?bs on`／`?bs off` と同じ切り替えができます。
+
 `swctl status` の `addon.bodies` に、追っている body の一覧（`list`）・見せた向き（`view`・`shown`）・ON の人（`players`）が出ます。
 
 ## 種類ごとの切り替え
