@@ -12,11 +12,43 @@ u16 bodyCount
 Body[bodyCount]:
     u8 type
     type 0: (no change since last sync)          data = 0
-    type 1: float[4] rotation + double[3] pos     data = 16 + 24 = 40   (first body is always type 1)
-    type 2: float[4] rotation + float[3]  pos     data = 16 + 12 = 28   (relative to first body)
+    type 1: float[4] rotation + double[3] pos     data = 16 + 24 = 40   (exactly one body: the HEAVIEST, see below — not always body0)
+    type 2: float[4] rotation + float[3]  pos     data = 16 + 12 = 28   (relative to the type-1 body)
 length = 4 + 4 + 4 + 2 + Σ (1 + typeDataLen)
 ```
 Header verified on driven vehicle id=16 (bodyCount=13, body0 type=1, rotation quat + double pos ~4104).
+
+**Which body is type 1** (2026-11-21, `swcap bodyq` on purpose-built 4–5 body vehicles joined by
+velocity pivots; body names from buttons with custom names):
+- Bodies appear in the order of `<body>` in the vehicle XML (ascending `unique_id`, i.e. creation order).
+- Exactly one body is type 1, the others type 2 (or 0). **It is the body with the largest mass** — the sum
+  of the components' `mass=` from `rom/data/definitions/<d>.xml` (no `d` = `01_block`, mass 1). That sum
+  matched the addon's vehicle mass exactly. It is **not** body0, the pivot root, the part count or the
+  body nearest the centre of mass.
+- A difference of 1 already decides. **On a tie the earlier body in the file wins** (that body also has
+  the lower `unique_id`; the two are not told apart).
+- The choice did not change while the vehicles were moved (100+ records each). Whether it changes at
+  run time when a body's mass changes (fuel, damage) is NOT checked.
+- type 2 values look like the body's pose in the type-1 body's local axes, at each body's centre of mass
+  (seen, not measured precisely).
+
+| vehicle (capture) | body order | masses | type 1 |
+|---|---|---|---|
+| sizima_v2 (`023734_706`) | roll, pitch, base, yaw | 23, 55, 2835, 48 | base (b2) |
+| sizima_v2_1 (`023734_706`) | base, roll, pitch, yaw | 2835, 23, 55, 48 | base (b0) |
+| sizima_v2_2 (`031141_152`) | v2 + center | center 10 at the CoM | base (b2) |
+| sizima_v2_3 (`032217_110`) | roll, pitch, base, yaw, center | roll 5247, base 2842 | roll (b0) |
+| sizima_v2_4 (`032534_061`) | same | roll 5247, base 23092 | base (b2) |
+| sizima_v2_5 (`033550_914`) | same | roll 5247 = base 5247 | roll (b0) |
+| sizima_v2_6 (`033550_914`) | base, roll, pitch, yaw, center | base 5247 = roll 5247 | base (b0) |
+| sizima_v2_7 (`033550_914`) | roll, pitch, base, yaw, center | roll 5247, base 5248 | base (b2) |
+| sizima_v2_8 (`033550_914`) | base, roll, pitch, yaw, center | base 5246, roll 5247 | roll (b1) |
+
+Captures are `build/captures/session_20261121_<name>.swcap`. Consequences: the relay (`relay.h`
+`fill_pose`, template capture) only edits records whose body0 is type 1 (`r[14] == 1`) and leaves the
+others native. The addon's `server.getVehiclePos(vehicle_id)` returns the pose of the FIRST body in the
+file, which is a different body from the type-1 body whenever body0 is not the heaviest — feeding that
+pose as the type-1 pose would be wrong.
 
 **`time` semantics (`swcap eta`):** `delta = record.time − envelope.tick` is always ≥ 0 (a genuine
 future ETA). **Near vehicle: delta = +5 for all records** (sync interval = 5 ticks, `time = tick + 5`).
@@ -136,3 +168,37 @@ Seen len **76** (payload 64, the common single form, 3333× across captures) and
 124-B header + **3 × 64-B entries**, each a body: `float[3] pos` + HP `float ≈ 100`). One entry per body;
 NPCs & objects both use it. The old fixed-76 guess mis-split the 328 form's zero tail into a phantom
 **tag 0x00** (not a real record — resolved by the variable rule).
+
+## 0x68 / 0x69 / 0x6A / 0x84 — wildlife fish  ✅ lengths fixed, meaning ✅ (matched against the save)
+Decoded 2026-11-08 from `session_20261108_045606_169` (1 peer, addon missile combat; these four were 25–33 % of
+walk failures). Lengths pinned with `swcap lens` (last-record cases) and `swcap solve`; all fixed. The same rules
+also lift the 2026-09 `--legacy` captures from 76–93 % to 99.8–100 % walked, so they are not new in the update.
+```
+0x84 (52): u32 tag · u32 uid · u32 world tick (= message tick) · f64 x,y,z · f32 quat[4] (|q| = 1)      fish pose
+0x68 (52): u32 tag · u32 fish_type · u32 0 · f64 x,y,z · f32[3] heading (x,0,z) · f32 scale (1.0)        fish spawn
+0x6A (38): u32 tag · u32 uid · f32[3] (0 in all samples) · f32[3] target_heading (x,0,z) · u16 0 ·
+           u16 jump_timer (180) · u16 out_of_water_timer (2000)                                        fish state
+0x69  (8): u32 tag · u32 uid                                                                             fish remove
+```
+Meaning (2026-11-14). The save keeps the same objects as `<wildlife fish_uid="N"><fish><f fish_type uid
+state_ticks jump_timer out_of_water_timer scale [turn_factor]><transform/><target_heading x z/><flee_heading/></f>`
+(`working_server/scene.xml`: 24 fish, uids 813..867, next uid 868). Against the capture:
+
+| capture | save `<f>` |
+|---|---|
+| ids 789..834, ~30 at a time, consecutive new ids (833, 834) | uids 813..867, `fish_uid` = next uid counter |
+| x 13950..14150, z −25860..−26070, y −3..−9 (mostly −5.0) | same area, y −4.95..−5.08 |
+| 0x84 moves 15–68 m per ~3400 ticks (0.3–1 m/s) | — (fish swim slowly) |
+| 0x6A unit vector, y = 0, constant per uid; equals the direction 0x84 moves (uid 827: (0,0,1) and +68 m in z; uid 808: (−0.84,0,−0.55) vs moved (−13,−9)) | `target_heading x z` |
+| 0x6A u16 180 / 2000 in every sample | `jump_timer="180" out_of_water_timer="2000"` on all 24 fish |
+| 0x68 first u32 = 15, 37 | `fish_type` values 2..42 include 15 and 37 |
+| 0x68 last f32 = 1.0; f32[3] before it = (−0.9987, −0, 0.0515), horizontal unit | `scale="1"`; initial heading |
+
+- Spawn/remove keep the count: `0x69 uid 815` (tick 32299) → `0x68 fish_type 15 @ (14125,−3,−25987)` (32300) →
+  first `0x84 uid 833` at the same position (32301); again `0x69 821` → `0x68 type 37` → `0x84 uid 834`. 0x68 carries
+  no uid; the new uid appears in the next 0x84.
+- 0x84 spacing is a distance LOD like 0x81's: uids 808/827 every ~11 ticks, the rest 260–1370. 0x6A every 24 ticks.
+- The two misses: the capture (11-08 04:56) and the save (11-14) are different sessions, so values are not compared
+  uid by uid; the first f32[3] of 0x6A (always 0) and its u16 0 are unknown (flee_heading / turn_factor?).
+  `hebi3_mm_1108` (saved 11-08 23:36) has no fish.
+- Still unknown on the legacy captures (< 0.2 % of messages): 0x6B, 0x6C, 0x82, 0x56 — maybe more wildlife.

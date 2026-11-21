@@ -31,7 +31,13 @@ struct Peer {
                                        // relays in its 0x05 player-list row)
     uint32_t tickLag = 0;              // lastTick - cliTick when the heartbeat arrived
     uint64_t hbMs = 0;
+    // Steam P2P route, polled from GetSessionConnectionInfo every kRouteMs: -1 = unknown (not connected
+    // yet / call failed), 0 = direct, 1 = relayed via Steam Datagram Relay. Only the flag is kept, no address.
+    int      relayed = -1;
+    int32_t  connState = 0;
+    uint64_t routeMs = 0;              // GetTickCount64 of the last poll
 };
+constexpr uint64_t kRouteMs = 5000;
 
 inline std::map<uint64_t, Peer> g_peers;
 // Liveness is inferred from traffic: the server sends every connected peer something every tick, so

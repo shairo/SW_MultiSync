@@ -56,6 +56,10 @@ inline int decode_len(const uint8_t* b, int len, int off) {
         case 0x55: L = 31; break;
         case 0x62: L = 12; break;   // load/purchase companion (u32 20000, u32 5)
         case 0x67: L = 25; break;   // character vitals (hp)
+        case 0x68: L = 52; break;   // fish spawn (fish_type, f64 xyz, heading, scale) — protocol/sync.md "wildlife fish"
+        case 0x69: L = 8;  break;   // fish remove (uid)
+        case 0x6A: L = 38; break;   // fish state (uid, f32[3], target_heading, u16 0, jump_timer, out_of_water_timer)
+        case 0x84: L = 52; break;   // fish pose (uid, tick, f64 xyz, f32 quat)
         case 0x88: L = 37; break;   // game settings bool[33]
         case 0x0A: L = 5;  break;   // join sequence: tag + u8 0, between the 0x06 character dump and the 0x88 settings
         case 0x95: L = 8;  break;

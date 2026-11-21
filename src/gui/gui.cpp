@@ -64,7 +64,7 @@ enum {
     // header
     ID_SERVER_TXT, ID_DLL_TXT, ID_INJECT_BTN, ID_AUTO_CHK, ID_VERSION_TXT,
     // status tab
-    ID_RELAY_BTN, ID_RELAY_NOTE, ID_TRAFFIC_TXT, ID_WALK_TXT, ID_PEERS_LV, ID_VEH_LV, ID_PEERS_LBL, ID_VEH_LBL, ID_VEH_CHK,
+    ID_RELAY_BTN, ID_RELAY_NOTE, ID_TRAFFIC_TXT, ID_WALK_TXT, ID_ADDON_TXT, ID_ADDON_BTN, ID_PEERS_LV, ID_VEH_LV, ID_PEERS_LBL, ID_VEH_LBL, ID_VEH_CHK,
     // settings tab
     ID_CFG_LV, ID_CFG_NAME, ID_CFG_EDIT, ID_CFG_APPLY, ID_CFG_HELP, ID_CFG_SAVE, ID_CFG_RELOAD, ID_CFG_NOTE,
     // startup tab (edits swhook.ini directly; no DLL needed)
@@ -72,10 +72,14 @@ enum {
     // log tab
     ID_LOGPKT_CHK, ID_DUMPWF_CHK, ID_CAP_AUTO, ID_DUMPMAX_LBL, ID_DUMPMAX, ID_DUMPMAX_APPLY, ID_CAP_TXT, ID_CAP_START, ID_CAP_STOP, ID_CAP_MARK, ID_CAP_COPY, ID_OPEN_DIR, ID_LOG_TXT, ID_LOG_NOTE,
     // startup tab: developer switch; debug tab (shown only with debugUi=1 in swhook.ini)
+    // WebMap tab (addon pose source, per-kind gate, turret / gun sync)
+    ID_WM_NOTE, ID_WM_KIND_LBL, ID_WM_MISSILE, ID_WM_SHIP, ID_WM_TANK, ID_WM_SUB, ID_WM_AIR, ID_WM_OTHER, ID_WM_KINDS_TXT,
+    ID_WM_BODY_LBL, ID_WM_BODY, ID_WM_BODY_TXT, ID_WM_FOOT,
     ID_ST_DEBUG, ID_DBG_NOTE, ID_DBG_LV, ID_DBG_LBL, ID_DBG_HOLD_LBL, ID_DBG_HOLD_MS, ID_DBG_HOLD, ID_DBG_RELEASE, ID_DBG_NUDGE_LBL, ID_DBG_NUDGE_TP, ID_DBG_NUDGE_TILE, ID_DBG_NUDGE_UNLOAD, ID_DBG_NUDGE_RELOAD, ID_DBG_DLL_UNLOAD, ID_DBG_RESULT, ID_DBG_HELP,
 };
-static const int kTabs = 5;                  // the last page is the debug tab, present in the tab control only when g_debugUi
-static const int kDebugTab = 4;
+static const int kTabs = 6;                  // the last page is the debug tab, present in the tab control only when g_debugUi
+static const int kWebMapTab = 4;
+static const int kDebugTab = 5;
 static bool g_debugUi = false;
 static std::vector<HWND> g_tabCtl[kTabs];    // controls per tab page
 static HWND g_tab;
@@ -152,6 +156,15 @@ static bool ipc_ok(const std::string& r) { return !r.empty() && B(r.c_str(), "ok
 // its field table gives names/help for both paths.
 static bool is_log_key(const std::string& n) { return n == "log" || n == "dumpWalkFail" || n == "dumpWalkFailMax"; }
 
+// WebMap tab checkboxes: one config key each (Stormworks_WebMap docs/progress/sync-kind-select.md)
+struct WmCheck { int id; const char* key; int relay::Cfg::*field; };
+static const WmCheck kWmChecks[] = {
+    { ID_WM_MISSILE, "addonMissile", &relay::Cfg::addonMissile }, { ID_WM_SHIP, "addonShip", &relay::Cfg::addonShip },
+    { ID_WM_TANK, "addonTank", &relay::Cfg::addonTank },          { ID_WM_SUB, "addonSub", &relay::Cfg::addonSub },
+    { ID_WM_AIR, "addonAir", &relay::Cfg::addonAir },             { ID_WM_OTHER, "addonOther", &relay::Cfg::addonOther },
+    { ID_WM_BODY, "bodySync", &relay::Cfg::bodySync },
+};
+
 static void refresh_config() {
     if (g_dllUp) {
         std::string r = ipc("config.get");
@@ -171,6 +184,7 @@ static void refresh_config() {
     }
     lv_fill(H(ID_CFG_LV), rows);
     CheckDlgButton(g_wnd, ID_LOGPKT_CHK, relay::g_cfg.log ? BST_CHECKED : BST_UNCHECKED);
+    for (const WmCheck& c : kWmChecks) CheckDlgButton(g_wnd, c.id, relay::g_cfg.*c.field ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_wnd, ID_DUMPWF_CHK, relay::g_cfg.dumpWalkFail ? BST_CHECKED : BST_UNCHECKED);
     if (GetFocus() != H(ID_DUMPMAX)) SetWindowTextW(H(ID_DUMPMAX), fmtw(L"%d", relay::g_cfg.dumpWalkFailMax).c_str());
     set(ID_CFG_NOTE, g_dllUp
@@ -262,7 +276,12 @@ static void render_status() {
     bool up = g_dllUp;
     EnableWindow(H(ID_RELAY_BTN), up && g_hooked);
     set(ID_RELAY_BTN, !up ? L"同期改善: —" : g_relay ? L"同期改善: ON（クリックで停止）" : L"同期改善: OFF（クリックで開始）");
-    if (!up) { set(ID_TRAFFIC_TXT, L"通信量: —"); set(ID_WALK_TXT, L"解析率: —"); return; }
+    // WebMap correction = config addonPoses (use the addon's vehicle poses as a relay source)
+    const char* cf = json::find_value(o, "config");
+    bool addonOn = cf ? N(cf, "addonPoses") != 0 : false;
+    EnableWindow(H(ID_ADDON_BTN), up);
+    set(ID_ADDON_BTN, !up ? L"WebMap補正: —" : addonOn ? L"WebMap補正: ON（クリックで停止）" : L"WebMap補正: OFF（クリックで開始）");
+    if (!up) { set(ID_TRAFFIC_TXT, L"通信量: —"); set(ID_WALK_TXT, L"解析率: —"); set(ID_ADDON_TXT, L"アドオン: —"); return; }
     const char* walk = json::find_value(o, "walk"); const char* inj = json::find_value(o, "inject");
     double t8 = walk ? N(walk, "type8") : 0, full = walk ? N(walk, "full") : 0;
     set(ID_TRAFFIC_TXT, fmtw(L"通信量: ゲーム本来 %s/s  +  同期追加 %s/s   （追加合計 %s, 追記 %.0f / 書換 %.0f レコード）",
@@ -270,6 +289,34 @@ static void render_status() {
         inj ? N(inj, "appended") : 0, inj ? N(inj, "rewritten") : 0));
     set(ID_WALK_TXT, fmtw(L"解析率: %.2f%%  (%.0f / %.0f パケット解析成功、失敗 %.0f、ダンプ %.0f)   プレイヤー %.0f   車両 %.0f",
         t8 ? 100.0 * full / t8 : 0, full, t8, t8 - full, walk ? N(walk, "dumped") : 0, N(o, "peerCount"), N(o, "vehicleCount")));
+    // addon pose source (WebMap addon → WebMapBridge → addon.poses): rates from the cumulative counters
+    const char* ad = json::find_value(o, "addon");
+    static double prevMs = 0, prevBatches = 0, prevFed = 0, rateBatches = 0, rateFed = 0;
+    double now = (double)GetTickCount64(), batches = ad ? N(ad, "batches") : 0, fed = ad ? N(ad, "fed") : 0;
+    if (prevMs > 0 && now - prevMs >= 900 && batches >= prevBatches) {
+        double dt = (now - prevMs) / 1000.0;
+        rateBatches = (batches - prevBatches) / dt; rateFed = (fed - prevFed) / dt;
+        prevMs = now; prevBatches = batches; prevFed = fed;
+    } else if (prevMs == 0 || batches < prevBatches) { prevMs = now; prevBatches = batches; prevFed = fed; }
+    if (!ad || batches == 0) {
+        set(ID_ADDON_TXT, L"アドオン: 未受信（WebMapBridge から届いていません）");
+    } else {
+        std::string src = Sx(ad, "source");
+        const wchar_t* how = src == "arrival" ? L"到着で推定"
+                           : src == "matched" ? L"位置で確認済み"
+                           : src == "matched-override" ? L"位置で上書き" : L"推定中";
+        std::wstring k = B(ad, "offsetKnown") ? fmtw(L"%.0f", N(ad, "offset")) : std::wstring(L"未確定");
+        set(ID_ADDON_TXT, fmtw(L"アドオン: tick補正 %s（%s）  受信 %.1f回/s  使用 %.0f台/s  一致 %.0f票",
+            k.c_str(), how, rateBatches, rateFed, N(ad, "votes")));
+    }
+    // per-kind gate and turret / gun sync (WebMap tab)
+    if (!ad || !B(ad, "kindsKnown"))
+        set(ID_WM_KINDS_TXT, L"種類の一覧: MapViewer から未受信（届くまでは、種類によらず全部の車両に使います）");
+    else
+        set(ID_WM_KINDS_TXT, fmtw(L"種類の一覧: %.0f 台（更新 %.0f 回）  チェックなしで使わなかった位置 %.0f 件",
+            N(ad, "kindVehicles"), N(ad, "kindUpdates"), N(ad, "kindSkipped")));
+    const char* bd = json::find_value(o, "bodies");
+    set(ID_WM_BODY_TXT, bd ? fmtw(L"砲塔・砲の記録 %.0f 本", N(bd, "tracks")) : std::wstring(L""));
 }
 
 // Freeze detector verdict for one peers[] entry (freeze{} object, see ipc-protocol.md). Short form for
@@ -357,7 +404,10 @@ static void render_peers() {
         double t3 = N(p, "type3"), rwf = N(p, "rwalkFull"), pos[3] = {0,0,0};
         bool hasPos = json::arr_nums(json::find_value(p, "pos"), pos, 3) == 3;
         SyncCells sc = sync_cells(p, now);
-        rows.push_back({ name_of(id), W(ids), conn ? L"接続中" : L"切断", sc.behind, sc.lag, sc.tps,bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
+        // Steam P2P の経路: 直接 / 中継（Steam Datagram Relay）/ 不明（接続前・取得できない）
+        std::string route = Sx(p, "route");
+        std::wstring routeW = route == "relay" ? L"中継" : route == "direct" ? L"直接" : L"不明";
+        rows.push_back({ name_of(id), W(ids), conn ? L"接続中" : L"切断", routeW, sc.behind, sc.lag, sc.tps,bytesw(vs) + L"/s", bytesw(vi) + L"/s", bytesw(vr) + L"/s",
                          fmtw(L"%.1f%%", t8 ? 100.0 * wf / t8 : 0), fmtw(L"%.1f%%", t3 ? 100.0 * rwf / t3 : 0),
                          hasPos ? fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]) : L"-",
                          fmtw(L"%.0f", N(p, "vehicles")), fmtw(L"%.0f 秒前", ago), freeze_text(p, now) });
@@ -377,19 +427,41 @@ static void render_vehicles() {
         json::arr_nums(json::find_value(v, "pos"), pos, 3);
         double sg = N(v, "srcGap"), grp;
         bool hasGrp = json::get_num(v, "group", grp);
-        std::wstring feeds; int nf = 0; double minGap = 1e9;
+        // 送り方（受信者ごと）: そのまま = サーバーの記録をそのまま / SW MultiSync経由 = サーバーの位置で書き換え /
+        // WebMap経由 = WebMap（アドオン）から受け取った位置で書き換え / fake = fake_missile の書き換え
+        auto modeName = [](const std::string& m) -> std::wstring {
+            if (m == "pass") return L"そのまま";
+            if (m == "relay") return L"SW MultiSync経由";
+            if (m == "addon") return L"WebMap経由";
+            if (m == "fake") return L"fake";
+            return L"?";
+        };
+        std::wstring feeds, modes; int nf = 0; double minGap = 1e9;
         json::for_each_elem(json::find_value(v, "feeds"), [&](const char* f) {
             uint64_t id = 0; json::get_u64(f, "steamId", id); double g = N(f, "gap");
+            std::wstring mw = modeName(Sx(f, "mode"));
             if (g < minGap) minGap = g; nf++;
             if (!feeds.empty()) feeds += L", ";
             auto it = g_names.find(id);
-            feeds += it != g_names.end() ? it->second + fmtw(L":%.0f", g) : fmtw(L"%llu:%.0f", (unsigned long long)id, g);
+            // 間隔: 実際にその人へ届く間隔。書き換えて自分で送っているときは、サーバー本来の間隔を括弧で添える
+            double every = N(f, "every"); if (every <= 0) every = g;
+            std::wstring gapW = every != g ? fmtw(L":%.0f(サーバー%.0f)", every, g) : fmtw(L":%.0f", g);
+            feeds += (it != g_names.end() ? it->second : fmtw(L"%llu", (unsigned long long)id)) + gapW + L" " + mw;
+            if (modes.find(mw) == std::wstring::npos) modes += (modes.empty() ? L"" : L" / ") + mw;
         });
-        rows.push_back({ fmtw(L"%.0f", N(v, "id")), hasGrp ? fmtw(L"%.0f", grp) : L"不明", fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]),
+        if (modes.empty()) modes = L"-（受信者なし）";
+        // fake の役割と、ひな形（サーバーの記録）がまだ無い車両（クライアントへ足せない）
+        std::string fake = Sx(v, "fake");
+        double ft = 0; json::get_num(v, "fakeTarget", ft);
+        if (fake == "alias") modes = fmtw(L"fake:追従→%.0f", ft);
+        else if (fake == "park") modes = fmtw(L"fake:船の下→%.0f", ft);
+        else if (fake == "standby") modes = L"fake:待機";
+        if (!B(v, "template")) modes += L"（ひな形なし）";
+        rows.push_back({ fmtw(L"%.0f", N(v, "id")), hasGrp ? fmtw(L"%.0f", grp) : L"不明", modes, fmtw(L"%.0f, %.0f, %.0f", pos[0], pos[1], pos[2]),
                          sg > 0 ? fmtw(L"%.0f", sg) : L"-", fmtw(L"%d", nf), feeds });
     });
     lv_fill(H(ID_VEH_LV), rows);
-    set(ID_VEH_LBL, fmtw(L"車両 (%d)  — グループ: 注入前スポーンは不明 / I_src: 最密な更新間隔tick / 受信者: 名前(不明ならSteamID):間隔tick", (int)rows.size()));
+    set(ID_VEH_LBL, fmtw(L"車両 (%d)  — グループ: 注入前スポーンは不明 / 送り方: そのまま・SW MultiSync経由・WebMap経由 / I_src: 最密な更新間隔tick / 受信者: 名前(不明ならSteamID):間隔tick 送り方", (int)rows.size()));
 }
 
 static void render_log() {
@@ -469,7 +541,7 @@ static void build_ui() {
     mk(L"STATIC", L"", SS_RIGHT, 600, 34, 300, 20, ID_VERSION_TXT);
 
     g_tab = mk(L"SysTabControl32", L"", WS_TABSTOP | WS_CLIPSIBLINGS, 12, 60, 888, 560, ID_TAB);
-    const wchar_t* names[] = { L"状態", L"設定", L"起動・注入", L"ログ・録画" };
+    const wchar_t* names[] = { L"状態", L"設定", L"起動・注入", L"ログ・録画", L"WebMap" };
     for (int i = 0; i < kTabs - 1; i++) { TCITEMW it{}; it.mask = TCIF_TEXT; it.pszText = (LPWSTR)names[i]; SendMessageW(g_tab, TCM_INSERTITEMW, i, (LPARAM)&it); }
     const int X = 24, Y = 92, WID = 864;   // page area
 
@@ -481,11 +553,11 @@ static void build_ui() {
     mk(L"STATIC", L"", 0, X + 316, Y + 22, WID - 316, 18, ID_WALK_TXT, 0);
     mk(L"STATIC", L"参加プレイヤー", 0, X, Y + 66, 400, 18, ID_PEERS_LBL, 0);
     HWND pl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 86, WID, 176, ID_PEERS_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(pl, { {L"名前", 110}, {L"SteamID", 125}, {L"状態", 50}, {L"遅延(申告)", 70}, {L"tick差", 50}, {L"TPS", 40},{L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40},{L"最終通信", 60}, {L"凍結検知", 110} });
+    lv_cols(pl, { {L"名前", 110}, {L"SteamID", 125}, {L"状態", 50}, {L"経路", 50}, {L"遅延(申告)", 70}, {L"tick差", 50}, {L"TPS", 40},{L"送信/s", 70}, {L"同期追加/s", 75}, {L"受信/s", 70}, {L"解析率", 55}, {L"受信解析率", 70}, {L"位置 (x, y, z)", 140}, {L"車両", 40},{L"最終通信", 60}, {L"凍結検知", 110} });
     mk(L"STATIC", L"車両", 0, X, Y + 272, 640, 18, ID_VEH_LBL, 0);
     mk(L"BUTTON", L"車両一覧を表示（デバッグ用）", WS_TABSTOP | BS_AUTOCHECKBOX, X + WID - 220, Y + 270, 220, 22, ID_VEH_CHK, 0);
     HWND vl = mk(L"SysListView32", L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, X, Y + 292, WID, 220, ID_VEH_LV, 0, WS_EX_CLIENTEDGE);
-    lv_cols(vl, { {L"ID", 50}, {L"グループ", 60}, {L"位置 (x, y, z)", 210}, {L"I_src", 50}, {L"受信者数", 60}, {L"受信者 (名前:間隔)", 400} });
+    lv_cols(vl, { {L"ID", 50}, {L"グループ", 60}, {L"送り方", 170}, {L"位置 (x, y, z)", 210}, {L"I_src", 50}, {L"受信者数", 60}, {L"受信者 (名前:間隔)", 400} });
 
     // --- settings tab
     mk(L"STATIC", L"項目をクリックして値を編集し「適用」。適用した値は稼働中すぐ効きます。「iniに保存」で次回以降にも引き継がれます。",
@@ -530,6 +602,27 @@ static void build_ui() {
        L"どちらもクライアントのワールド更新が止まった署名（詳細: tools/swcap/README.md）。検知時は .log に FREEZE? 行と録画マーカーが自動で入ります。",
        0, X, Y + 452, WID, 54, ID_DBG_HELP, kDebugTab);
 
+    // --- WebMap tab (WebMap addon → WebMapBridge → addon.poses / addon.kinds)
+    mk(L"STATIC", L"WebMap（アドオン → WebMapBridge）から受け取った位置を同期に使うかを選びます。変更はその場で効き、「設定」タブの「iniに保存」で次回以降にも残ります。",
+       0, X, Y, WID, 36, ID_WM_NOTE, kWebMapTab);
+    mk(L"STATIC", L"", 0, X, Y + 42, WID, 18, ID_ADDON_TXT, kWebMapTab);
+    mk(L"BUTTON", L"", WS_TABSTOP | BS_PUSHBUTTON, X, Y + 64, 260, 26, ID_ADDON_BTN, kWebMapTab);
+    mk(L"STATIC", L"車体の位置を WebMap 経由で同期する種類（種類は MapViewer の Type。ミサイル以外はまだ確かめていないので、既定では外しています）",
+       0, X, Y + 104, WID, 18, ID_WM_KIND_LBL, kWebMapTab);
+    mk(L"BUTTON", L"ミサイル (addonMissile)", WS_TABSTOP | BS_AUTOCHECKBOX, X + 16, Y + 128, 260, 22, ID_WM_MISSILE, kWebMapTab);
+    mk(L"BUTTON", L"船 (addonShip)", WS_TABSTOP | BS_AUTOCHECKBOX, X + 16, Y + 152, 260, 22, ID_WM_SHIP, kWebMapTab);
+    mk(L"BUTTON", L"戦車 (addonTank) — 車体だけ。砲塔・砲は下", WS_TABSTOP | BS_AUTOCHECKBOX, X + 16, Y + 176, 400, 22, ID_WM_TANK, kWebMapTab);
+    mk(L"BUTTON", L"潜水艦 (addonSub)", WS_TABSTOP | BS_AUTOCHECKBOX, X + 16, Y + 200, 260, 22, ID_WM_SUB, kWebMapTab);
+    mk(L"BUTTON", L"航空機 (addonAir)", WS_TABSTOP | BS_AUTOCHECKBOX, X + 16, Y + 224, 260, 22, ID_WM_AIR, kWebMapTab);
+    mk(L"BUTTON", L"そのほか (addonOther) — Torpedo・Bullet・Type なし", WS_TABSTOP | BS_AUTOCHECKBOX, X + 16, Y + 248, 400, 22, ID_WM_OTHER, kWebMapTab);
+    mk(L"STATIC", L"", 0, X + 16, Y + 276, WID - 16, 18, ID_WM_KINDS_TXT, kWebMapTab);
+    mk(L"STATIC", L"砲塔・砲（試作）", 0, X, Y + 310, WID, 18, ID_WM_BODY_LBL, kWebMapTab);
+    mk(L"BUTTON", L"戦車の砲塔・砲を同期する (bodySync) — 外すと全員分止まります。各プレイヤーはゲームのチャットの ?bs on で入れます",
+       WS_TABSTOP | BS_AUTOCHECKBOX, X + 16, Y + 334, WID - 16, 22, ID_WM_BODY, kWebMapTab);
+    mk(L"STATIC", L"", 0, X + 16, Y + 360, WID - 16, 18, ID_WM_BODY_TXT, kWebMapTab);
+    mk(L"STATIC", L"種類の一覧が一度も届いていないあいだ（MapViewer が古いときなど）は、チェックによらず全部の車両に使います。チェックを外すと、その種類の車両はすぐにゲーム本来の同期へ戻ります。",
+       0, X, Y + 396, WID, 36, ID_WM_FOOT, kWebMapTab);
+
     // --- log tab
     mk(L"BUTTON", L"ログファイルを書く (log) — captures\\session_<日時>.log。起動・設定変更・同期統計などのイベントを記録", WS_TABSTOP | BS_AUTOCHECKBOX, X, Y, WID, 22, ID_LOGPKT_CHK, 3);
     mk(L"BUTTON", L"解析に失敗したパケットを記録する (dumpWalkFail) — captures\\walkfail_<日時>.swcap に1セッション1ファイル", WS_TABSTOP | BS_AUTOCHECKBOX, X, Y + 26, WID, 22, ID_DUMPWF_CHK, 3);
@@ -558,6 +651,14 @@ static void on_command(int id) {
         if (r == injector::Failed) MessageBoxW(g_wnd, (L"注入に失敗しました:\n" + W(err)).c_str(), L"SWMultiSync", MB_ICONERROR);
         poll(); break; }
     case ID_RELAY_BTN: ipc("relay.set", g_relay ? "\"enabled\":false" : "\"enabled\":true"); poll(); break;
+    case ID_ADDON_BTN: {   // WebMap correction on/off (config addonPoses, live; persisted only by "iniに保存")
+        const char* cf = json::find_value(g_status.c_str(), "config");
+        bool on = cf ? N(cf, "addonPoses") != 0 : false;
+        cfg_set("addonPoses", on ? 0 : 1); poll(); break;
+    }
+    case ID_WM_MISSILE: case ID_WM_SHIP: case ID_WM_TANK: case ID_WM_SUB: case ID_WM_AIR: case ID_WM_OTHER: case ID_WM_BODY:
+        for (const WmCheck& c : kWmChecks) if (c.id == id) cfg_set(c.key, IsDlgButtonChecked(g_wnd, id) == BST_CHECKED ? 1 : 0);
+        poll(); break;
     case ID_VEH_CHK: g_showVeh = IsDlgButtonChecked(g_wnd, ID_VEH_CHK) == BST_CHECKED; g_vehJson.clear(); poll(); break;
     case ID_CFG_APPLY: {
         wchar_t name[64], val[64]; GetWindowTextW(H(ID_CFG_NAME), name, 64); GetWindowTextW(H(ID_CFG_EDIT), val, 64);
