@@ -311,18 +311,39 @@ static void put_chat(std::vector<uint8_t>& v, const std::string& text, const std
 
 // ---- in-game chat commands (`?` lines go to addons and never reach the chat, so only the DLL sees them) ----
 #include "unstuck.h"
-// `?multisync`: tell that player alone the DLL version and whether relay is on — a status check from inside the game.
-static void on_multisync(uint64_t sid) {
+// Queue a chat line to that player alone (rides along with a pending nudge instead of dropping it).
+static void tell_player(uint64_t sid, const char* msg, const char* kind) {
     std::vector<uint8_t> v;
-    char msg[96]; _snprintf_s(msg, _TRUNCATE, "SW_MultiSync v%s  relay: %s", SWHOOK_VERSION, g_relay ? "ON" : "OFF");
     put_chat(v, msg, "[SW_MultiSync]");
-    auto it = g_nudge.find(sid);                              // don't drop a pending nudge: ride along with it
+    auto it = g_nudge.find(sid);
     if (it != g_nudge.end()) { it->second.recs.insert(it->second.recs.end(), v.begin(), v.end()); ++it->second.count; }
-    else { Nudge nd; nd.kind = "multisync"; nd.recs = std::move(v); nd.count = 1; g_nudge[sid] = std::move(nd); }
+    else { Nudge nd; nd.kind = kind; nd.recs = std::move(v); nd.count = 1; g_nudge[sid] = std::move(nd); }
+}
+static const char* bs_state(uint64_t sid) {
+    if (!relay::g_bodyPeers.count(sid)) return "OFF";
+    return relay::g_cfg.bodySync ? "ON" : "ON (server-wide bodySync is OFF)";
+}
+// `?multisync`: tell that player alone the DLL version, whether relay is on and their own gun sync (?bs).
+static void on_multisync(uint64_t sid) {
+    char msg[128]; _snprintf_s(msg, _TRUNCATE, "SW_MultiSync v%s  relay: %s  bs(you): %s", SWHOOK_VERSION, g_relay ? "ON" : "OFF", bs_state(sid));
+    tell_player(sid, msg, "multisync");
     logf("== multisync: peer=%llu relay=%d ==\n", (unsigned long long)sid, (int)g_relay);
+}
+// `?bs` shows, `?bs on` / `?bs off` sets the turret / gun rewrite for that player alone (2026-11-21; default off).
+// The reply goes to that player alone. Live only (not saved): a re-inject turns everyone off again.
+static void on_bs(uint64_t sid, int set) {   // set: -1 = show, 0 = off, 1 = on
+    if (set == 1) relay::g_bodyPeers.insert(sid);
+    else if (set == 0) relay::g_bodyPeers.erase(sid);
+    char msg[96]; _snprintf_s(msg, _TRUNCATE, "bs (turret / gun sync for you): %s", bs_state(sid));
+    tell_player(sid, msg, "bs");
+    logf("== bs: peer=%llu %s -> %d (players on %zu) ==\n", (unsigned long long)sid, set < 0 ? "show" : "set",
+         (int)relay::g_bodyPeers.count(sid), relay::g_bodyPeers.size());
 }
 static void on_chat_cmd(uint64_t sid, const stats::Peer& ps, const uint8_t* s, int n, uint64_t now) {   // exact match
     if (n == 10 && !memcmp(s, "?multisync", 10)) on_multisync(sid);
+    else if (n == 3 && !memcmp(s, "?bs", 3)) on_bs(sid, -1);
+    else if (n == 6 && !memcmp(s, "?bs on", 6)) on_bs(sid, 1);
+    else if (n == 7 && !memcmp(s, "?bs off", 7)) on_bs(sid, 0);
     else if (int mode = unstuck_cmd(s, n)) on_unstuck(sid, ps, mode, now);
 }
 
@@ -447,7 +468,7 @@ static int32_t Hooked_Send(void* self, const SteamNetworkingIdentity* id,
                 off += L;
             }
             addon::expire_fakes(tick);                               // fake orders lapse when the addon feed stopped
-            if (g_relay || !relay::g_alias.empty() || !relay::g_releaseSnap.empty() || !relay::g_standby.empty() || relay::g_orbit.on) {   // build the injected copy (alias / orbit work with relay off)
+            if (g_relay || !relay::g_alias.empty() || !relay::g_releaseSnap.empty() || !relay::g_standby.empty() || relay::g_orbit.on || relay::g_bodyOff.on) {   // build the injected copy (alias / orbit work with relay off)
                 int cap = (int)cub + relay::kMaxPerSend * relay::kMaxRecLen;
                 inj = static_cast<uint8_t*>(malloc(cap));
                 if (inj) {
@@ -552,6 +573,12 @@ static int32_t Hooked_Recv(void* self, int32_t ch, SteamNetworkingMessage_t** pp
                             int tn = (int)rec::U16(body, blen, off + 4);
                             on_chat_line(sid, body + off + 6, tn);
                             on_chat_cmd(sid, ps, body + off + 6, tn, now);
+                        }
+                        else if (body[off] == 0x64) {   // seat key state: u32 keyMask (experiment: hotkey 6 nudges the gun)
+                            uint32_t mask = rec::U32(body, blen, off + 4);
+                            if (relay::key_step(sid, mask))
+                                logf("== hotkey 6: gun offset veh=%u body=%d now %.3f deg (step %.3f) ==\n",
+                                     relay::g_bodyOff.veh, relay::g_bodyOff.body, relay::g_bodyOff.yawDeg, relay::g_bodyOff.stepDeg);
                         }
                         else if (body[off] == 0x34) {   // heartbeat: u32 clientTick · u32 0 · u32 clientTps · u32 framesBehind
                             ps.cliTick = rec::U32(body, blen, off + 4); ps.cliTps = rec::U32(body, blen, off + 12);
@@ -663,6 +690,63 @@ static void write_status(json::JsonW& w) {
         .kv("standbyRecords", relay::g_standbyRecords);
     w.key("alias").arr();
     for (auto& a : relay::g_alias) w.arr().num((unsigned)a.first).num((unsigned)a.second).end();
+    w.end();
+    // turret / gun prototype (relay.h body_*): errors = addon prediction vs native 0x81, before each re-measure
+    w.key("bodies").obj()
+        .kv("sync", relay::g_cfg.bodySync).kv("tracks", (unsigned)relay::g_bodies.size())
+        .kv("samples", relay::g_bodySamples).kv("measured", relay::g_bodyMeasured)
+        .kv("writes", relay::g_bodyWrites).kv("built", relay::g_bodyBuilt).kv("checks", relay::g_bodyErrN)
+        .kv("pending", (unsigned)relay::g_bodyPending.size()).kv("pendingDropped", relay::g_bodyPendingDropped).kv("rejected", relay::g_bodyRejected).kv("resets", relay::g_bodyResets)
+        .kv("errPosAvg", relay::g_bodyErrN ? relay::g_bodyErrPosSum / relay::g_bodyErrN : 0.0)
+        .kv("errAngAvg", relay::g_bodyErrN ? relay::g_bodyErrAngSum / relay::g_bodyErrN : 0.0)
+        .kv("errPosMax", relay::g_bodyErrPosMax).kv("errAngMax", relay::g_bodyErrAngMax);
+    w.key("list").arr();
+    {
+        int k = 0;
+        for (auto& kv : relay::g_bodies) {
+            if (k++ >= 64) break;
+            const relay::BodyTrack& b = kv.second;
+            w.obj().kv("veh", (unsigned)kv.first.first).kv("body", kv.first.second).kvb("offKnown", b.offKnown)
+                .kv("offX", b.off[0]).kv("offY", b.off[1]).kv("offZ", b.off[2]).kv("measured", b.measured)
+                .kv("errPos", b.errPos).kv("errAng", b.errAng).kv("okRun", b.okRun).kv("missRun", b.missRun).kv("rejected", b.rejected).kv("resets", b.resets)
+                .kv("lastT", (unsigned)(b.n ? relay::body_latest(b).t : 0)).end();
+        }
+    }
+    w.end();
+    // what each client is shown vs the true body angle (server's own type-2, before rewrites); degrees
+    w.key("view").arr();
+    {
+        int k = 0;
+        for (auto& kv : relay::g_bodyView) {
+            if (k++ >= 64) break;
+            const relay::BodyView& v = kv.second;
+            w.obj().kv("veh", (unsigned)std::get<0>(kv.first)).kv("body", std::get<1>(kv.first)).kv("peer", std::get<2>(kv.first))
+                .kv("nat2", v.nat2).kv("nat0", v.nat0).kv("n", v.n).kv("last", v.last).kv("avg", v.n ? v.sum / v.n : 0.0).kv("max", v.max)
+                .kv("stillN", v.stillN).kv("stillLast", v.stillLast).kv("stillAvg", v.stillN ? v.stillSum / v.stillN : 0.0).kv("stillMax", v.stillMax).end();
+        }
+    }
+    w.end();
+    // what each client was actually sent (native type 2 or our near-client write) vs the true body angle
+    w.kv("near", relay::g_bodyNear);
+    // players who turned the gun rewrite on (`?bs on`); everyone else gets the server's bodies as they are
+    w.key("players").arr();
+    for (uint64_t sid : relay::g_bodyPeers) {
+        auto pit = stats::g_peers.find(sid);
+        w.obj().kv("peer", sid).kv("name", pit != stats::g_peers.end() ? pit->second.name : std::string()).end();
+    }
+    w.end();
+    w.key("shown").arr();
+    {
+        int k = 0;
+        for (auto& kv : relay::g_bodyShown) {
+            if (k++ >= 64) break;
+            const relay::BodyShown& v = kv.second;
+            w.obj().kv("veh", (unsigned)std::get<0>(kv.first)).kv("body", std::get<1>(kv.first)).kv("peer", std::get<2>(kv.first))
+                .kv("n", v.n).kv("last", v.last).kv("avg", v.n ? v.sum / v.n : 0.0).kv("max", v.max)
+                .kv("stillN", v.stillN).kv("stillAvg", v.stillN ? v.stillSum / v.stillN : 0.0).kv("stillMax", v.stillMax).end();
+        }
+    }
+    w.end();
     w.end();
     {
         int64_t am; int as;
@@ -834,6 +918,28 @@ static std::string ipc_handle(const std::string& line) {
         logf("== debug.orbit veh=%u on=%d center=(%.1f,%.1f,%.1f) r=%.1f period=%.0f (ipc) ==\n",
              o.veh, (int)o.on, o.cx, o.cy, o.cz, o.r, o.period);
         w.kvb("ok", true).kvb("on", o.on).kv("veh", (unsigned)o.veh).kv("records", relay::g_orbitRecords);
+    } else if (cmd == "debug.bodyoff") {
+        // experiment only (never on by default, not in the GUI): shift one body of a vehicle in its 0x81
+        double veh = 0, en = 1, v;
+        json::get_num(line.c_str(), "veh", veh);
+        if (json::get_num(line.c_str(), "enabled", v)) en = v;
+        relay::BodyOff b = relay::g_bodyOff;
+        b.on = en != 0 && veh > 0; b.veh = (uint32_t)veh;
+        if (json::get_num(line.c_str(), "body", v)) b.body = (int)v;
+        if (json::get_num(line.c_str(), "dx", v)) b.dx = v;
+        if (json::get_num(line.c_str(), "dy", v)) b.dy = v;
+        if (json::get_num(line.c_str(), "dz", v)) b.dz = v;
+        if (json::get_num(line.c_str(), "rx", v)) b.rx = v;
+        if (json::get_num(line.c_str(), "ry", v)) b.ry = v;
+        if (json::get_num(line.c_str(), "rz", v)) b.rz = v;
+        if (json::get_num(line.c_str(), "rw", v)) b.rw = v;
+        if (json::get_num(line.c_str(), "stepDeg", v)) b.stepDeg = v;
+        if (json::get_num(line.c_str(), "yawDeg", v)) b.yawDeg = v;   // the offset the given rx..rw stand for
+        relay::g_bodyOff = b;
+        logf("== debug.bodyoff veh=%u on=%d body=%d d=(%.2f,%.2f,%.2f) (ipc) ==\n",
+             b.veh, (int)b.on, b.body, b.dx, b.dy, b.dz);
+        w.kvb("ok", true).kvb("on", b.on).kv("veh", (unsigned)b.veh).kv("body", b.body).kv("records", relay::g_bodyOffRecords)
+            .kv("yawDeg", b.yawDeg).kv("stepDeg", b.stepDeg).kv("keySteps", relay::g_keySteps);
     } else if (cmd == "addon.poses") {
         int fed = 0, n = addon::on_batch(line.c_str(), g_worldTick, fed);
         if (n < 0) w.kvb("ok", false).kv("error", "need tc and data[[id,x,y,z,qx,qy,qz,qw],...]");

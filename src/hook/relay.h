@@ -19,6 +19,7 @@
 #include <string>
 #include <cmath>
 #include <map>
+#include <tuple>
 #include <set>
 #include <array>
 #include <vector>
@@ -76,6 +77,8 @@ struct Cfg {
     int    freezeDefMs  = 3000;   // a pushed vehicle definition unacknowledged (no 0x29) this long
     // addon pose source (addon.h): body0 poses of every vehicle from the Stormworks addon over IPC
     int    addonPoses   = 1;      // 1 = use addon.poses samples as a relay source (once the tick offset is known)
+    // non-root body poses (prototype, docs: Stormworks_WebMap docs/progress/turret-sync.md): addon.poses "bp"
+    int    bodySync     = 0;      // 1 = rewrite type-2 bodies (turret, gun) of relayed 0x81 from the addon's body poses
 };
 inline Cfg g_cfg;
 
@@ -113,6 +116,7 @@ inline const CfgField kCfgFields[] = {
     {"freezePoseMs",    true,  &Cfg::freezePoseMs,    nullptr, false, "freeze detector: pose static this long while its vehicle moves (ms, 0 = off)"},
     {"freezeDefMs",     true,  &Cfg::freezeDefMs,     nullptr, false, "freeze detector: pushed vehicle definition unacked this long (ms, 0 = off)"},
     {"addonPoses",      true,  &Cfg::addonPoses,      nullptr, false, "1 = use vehicle poses sent by the addon (IPC addon.poses) as a relay source"},
+    {"bodySync",        true,  &Cfg::bodySync,        nullptr, false, "1 = rewrite turret/gun bodies (type 2) of relayed 0x81 from the addon body poses (prototype)"},
 };
 constexpr int kCfgFieldCount = (int)(sizeof(kCfgFields) / sizeof(kCfgFields[0]));
 
@@ -354,6 +358,17 @@ struct Orbit { bool on = false; uint32_t veh = 0; double cx = 0, cy = 0, cz = 0,
 inline Orbit g_orbit;
 inline uint64_t g_orbitRecords = 0;
 
+// Debug body offset (IPC debug.bodyoff, experiments only, off by default): add (dx, dy, dz) to body
+// `body` (file order) of vehicle `veh` in every 0x81 sent to clients. A type-2 body is moved in the
+// type-1 body's local axes (its float pos), a type-1 body in world axes (its double pos). A type-0
+// body (no change) is left alone, so the client keeps the last pose it was sent.
+// The body's rotation is pre-multiplied by (rx, ry, rz, rw) — in the same frame as its pos (identity = no turn).
+struct BodyOff { bool on = false; uint32_t veh = 0; int body = 0; double dx = 0, dy = 0, dz = 0;
+                 double rx = 0, ry = 0, rz = 0, rw = 1;
+                 double stepDeg = 0.05, yawDeg = 0; };   // seat hotkey 6 adds stepDeg about body0 y (key_step)
+inline BodyOff g_bodyOff;
+inline uint64_t g_bodyOffRecords = 0;
+
 // Called for every native body0 sample (addon.h uses it to find the addon's tick offset). May be null.
 inline void (*g_onNative)(uint32_t veh, uint32_t tick, double x, double y, double z) = nullptr;
 
@@ -372,6 +387,10 @@ inline int interval_of(const Veh& v, uint32_t natGap) {
     return (int)i;
 }
 
+inline void body_native(const uint8_t* r, int L, uint32_t V, uint32_t tick);
+inline void body_view_native(uint64_t peer, const uint8_t* r, int L, uint32_t V, uint32_t tick);
+inline void bodies_forget(uint32_t V);
+
 // Update caches from one recipient's fully-decoded type=8 body. Passive.
 inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick) {
     int count = (int)rec::U32(body, blen, 16), off = 20;
@@ -389,7 +408,7 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
             // This is also the teleport/respawn guard: no velocity ever spans the jump.
             uint32_t V = rec::U32(body, blen, off + 4);
             g_veh.erase(V);
-            if (tag == 0x38) g_group.erase(V);                                   // despawned for good
+            if (tag == 0x38) { g_group.erase(V); bodies_forget(V); }              // despawned for good
             // This recipient no longer has V: drop its per-(peer,veh) feed state so the peer's vehicle
             // count reflects what it currently receives (a reload repopulates within two 0x81).
             auto key = std::make_pair(peer, V);
@@ -415,6 +434,8 @@ inline void observe(uint64_t peer, const uint8_t* body, int blen, uint32_t tick)
             if (off + 14 < blen && body[off + 14] == 1 && L <= kMaxRecLen && off + 31 + 24 <= blen) {
                 Veh& v = g_veh[V];
                 if (g_onNative) g_onNative(V, tick, D(body + off + 31), D(body + off + 39), D(body + off + 47));
+                body_native(body + off, L, V, tick);                                 // turret / gun offsets (prototype)
+                body_view_native(peer, body + off, L, V, tick);                      // what this client is shown (diagnostic)
                 bool addonFeeds = g_cfg.addonPoses && v.addonT != 0 && tick <= v.addonT + kAddonFreshTicks;
                 if (addonFeeds || (v.has && tick <= v.curT)) {
                     // pose comes from the other source (or is not newer): keep only the template fresh
@@ -624,6 +645,408 @@ inline void promise_of(const Veh& v, uint64_t peer, uint32_t V, uint32_t tick, u
     target = tl > (long)v.curT ? (uint32_t)tl : v.curT;
 }
 
+// ---- non-root bodies (prototype: turret / gun sync; Stormworks_WebMap docs/progress/turret-sync.md) ----
+// The addon sends, for body bi >= 1 of a vehicle, the pose of ONE voxel of that body (addon.poses "bp"):
+// the voxel's world position and the body's rotation. In 0x81 a type-2 body is its centre of mass relative
+// to the type-1 body: world CoM = P1 + R(q1)·rel_p, world rotation q = q1 ⊗ rel_q (quaternions x, y, z, w;
+// checked on sizima_v2_9, 2026-11-21). The voxel→CoM offset in body axes is measured from native records:
+// off = R(q)ᵀ (CoM − voxel), so no part masses are needed. Prototype limits: body0 must be the type-1 body
+// (the relay already only handles those records); bodies the addon does not report are left as they are.
+constexpr int    kBodyRing        = 8;     // addon samples kept per body (≈ 24 ticks at 3)
+constexpr double kBodyOffAlpha    = 0.2;   // smoothing of the measured offset
+constexpr long   kBodyHorizon     = 30;    // max extrapolation of a body pose past its newest sample (ticks)
+// Guard (2026-11-21, BB-05 battleship): measurements taken while a turret slews can be far off (2 m / 6°,
+// some 45°) and the smoothed offset absorbed them, leaving 0.3–1.3 m after the guns stopped. A check that
+// misses by more than this is discarded; kBodyResetAfter misses in a row mean the CoM really moved (ammo
+// used up, damage): start again from the newest measurement. A body is written only after a check passed
+// and while the latest check passed.
+constexpr double kBodyRejectPos   = 0.5;   // m
+constexpr double kBodyRejectAng   = 3.0;   // degrees
+constexpr int    kBodyResetAfter  = 3;
+struct BSample { uint32_t t = 0; double x = 0, y = 0, z = 0; double q[4] = { 0, 0, 0, 1 }; };
+struct BodyTrack {
+    BSample s[kBodyRing]; int n = 0, head = 0;
+    bool offKnown = false; double off[3] = { 0, 0, 0 };
+    uint64_t measured = 0;
+    uint32_t lastNative = 0;         // one measurement per native tick (every recipient gets the same record)
+    double errPos = 0, errAng = 0;   // last check of the prediction against a native record (m, degrees)
+    int okRun = 0, missRun = 0;      // consecutive checks within / outside the guard
+    uint64_t rejected = 0, resets = 0;
+};
+inline std::map<std::pair<uint32_t, int>, BodyTrack> g_bodies;   // (vehicle, body index) -> track
+inline uint64_t g_bodySamples = 0, g_bodyMeasured = 0, g_bodyWrites = 0, g_bodyBuilt = 0, g_bodyErrN = 0;
+inline uint64_t g_bodyRejected = 0, g_bodyResets = 0;
+inline double   g_bodyErrPosSum = 0, g_bodyErrAngSum = 0, g_bodyErrPosMax = 0, g_bodyErrAngMax = 0;
+
+inline void qmul(const double a[4], const double b[4], double o[4]) {
+    double x = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
+    double y = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0];
+    double z = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3];
+    double w = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
+    o[0] = x; o[1] = y; o[2] = z; o[3] = w;
+}
+inline void qrot(const double q[4], const double v[3], double o[3]) {          // R(q)·v
+    double p[4] = { v[0], v[1], v[2], 0 }, c[4] = { -q[0], -q[1], -q[2], q[3] }, t[4], r[4];
+    qmul(q, p, t); qmul(t, c, r);
+    o[0] = r[0]; o[1] = r[1]; o[2] = r[2];
+}
+inline void qrotT(const double q[4], const double v[3], double o[3]) {         // R(q)ᵀ·v
+    double c[4] = { -q[0], -q[1], -q[2], q[3] };
+    qrot(c, v, o);
+}
+// Angle between two rotations: atan2 of the relative rotation a·b* (vector part, |scalar part|), not acos of
+// the dot product, which loses ~0.05° near 0 on float-rounded quaternions (near clients compare at 0.01°).
+inline double qangle_deg(const double a[4], const double b[4]) {
+    double c[4] = { -b[0], -b[1], -b[2], b[3] }, r[4];
+    qmul(a, c, r);
+    return 2.0 * std::atan2(std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]), std::fabs(r[3])) * 57.29577951308232;
+}
+inline void qnorm(double q[4]) {
+    double n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (n <= 1e-12) { q[0] = q[1] = q[2] = 0; q[3] = 1; return; }
+    for (int i = 0; i < 4; i++) q[i] /= n;
+}
+inline const BSample& body_latest(const BodyTrack& b) { return b.s[(b.head + kBodyRing - 1) % kBodyRing]; }
+inline bool has_bodies(uint32_t V) {
+    auto it = g_bodies.lower_bound(std::make_pair(V, 0));
+    return it != g_bodies.end() && it->first.first == V;
+}
+
+// One addon body sample, already on the world tick (addon.h).
+// Diagnostic (2026-11-21): how far the body a client is shown is from the true one. Per (vehicle, body, peer)
+// keep the last type-2 rel q / rel p the SERVER sent that client (passive, before any rewrite); every addon
+// sample (the true body pose in the same body0-relative frame, at its voxel) is compared with it. The voxel
+// sits off the CoM, so the position error carries the offset: only the angle is compared with the native
+// rotation; a sample whose pose did not change since the previous one counts as "still" (what remains once
+// the gun stops = what the server never sent).
+struct BodyView {
+    bool have = false; double rq[4] = { 0, 0, 0, 1 }; uint32_t t = 0;
+    uint64_t nat2 = 0, nat0 = 0, n = 0, stillN = 0;
+    double last = 0, sum = 0, max = 0, stillLast = 0, stillSum = 0, stillMax = 0;
+};
+inline std::map<std::tuple<uint32_t, int, uint64_t>, BodyView> g_bodyView;   // (vehicle, body, peer)
+// What each client was last sent for a body (native type 2 or our write; bodynear_pass) and its error vs the truth.
+constexpr double kNearBodyDeg = 0.01;
+struct BodyShown { bool have = false; double rq[4] = { 0, 0, 0, 1 }; uint64_t n = 0, stillN = 0; double last = 0, sum = 0, max = 0, stillSum = 0, stillMax = 0; };
+inline std::map<std::tuple<uint32_t, int, uint64_t>, BodyShown> g_bodyShown;   // (vehicle, body, peer)
+inline uint64_t g_bodyNear = 0;
+// Per-player switch (2026-11-21, `?bs on|off` in game chat): the turret / gun rewrite reaches only the players
+// who turned it on (default off). bodySync stays the master switch for everyone. Live only (not saved).
+inline std::unordered_set<uint64_t> g_bodyPeers;
+inline bool body_sync_for(uint64_t peer) { return g_cfg.bodySync && g_bodyPeers.count(peer) > 0; }
+inline void body_view_native(uint64_t peer, const uint8_t* r, int L, uint32_t V, uint32_t tick) {
+    if (L < 14 + 41 || r[14] != 1) return;
+    int cnt = (int)(r[12] | (r[13] << 8)), p = 14;
+    for (int bi = 0; bi < cnt && p < L; bi++) {
+        int t = r[p], dl = t == 0 ? 0 : t == 1 ? 40 : t == 2 ? 28 : -1;
+        if (dl < 0 || p + 1 + dl > L) return;
+        if (bi >= 1 && g_bodies.count(std::make_pair(V, bi))) {
+            BodyView& w = g_bodyView[std::make_tuple(V, bi, peer)];
+            if (t == 2) {
+                double q[4] = { F(r + p + 1), F(r + p + 5), F(r + p + 9), F(r + p + 13) };
+                qnorm(q); for (int i = 0; i < 4; i++) w.rq[i] = q[i];
+                w.have = true; w.t = tick; w.nat2++;
+            } else if (t == 0) w.nat0++;
+        }
+        p += 1 + dl;
+    }
+}
+inline void body_view_sample(uint32_t V, int bi, const double q[4], bool still) {
+    for (auto it = g_bodyShown.lower_bound(std::make_tuple(V, bi, (uint64_t)0));
+         it != g_bodyShown.end() && std::get<0>(it->first) == V && std::get<1>(it->first) == bi; ++it) {
+        BodyShown& w = it->second;
+        if (!w.have) continue;
+        double e = qangle_deg(w.rq, q);
+        w.last = e; w.sum += e; w.n++; if (e > w.max) w.max = e;
+        if (still) { w.stillSum += e; w.stillN++; if (e > w.stillMax) w.stillMax = e; }
+    }
+    for (auto it = g_bodyView.lower_bound(std::make_tuple(V, bi, (uint64_t)0));
+         it != g_bodyView.end() && std::get<0>(it->first) == V && std::get<1>(it->first) == bi; ++it) {
+        BodyView& w = it->second;
+        if (!w.have) continue;
+        double e = qangle_deg(w.rq, q);
+        w.last = e; w.sum += e; w.n++; if (e > w.max) w.max = e;
+        if (still) { w.stillLast = e; w.stillSum += e; w.stillN++; if (e > w.stillMax) w.stillMax = e; }
+    }
+}
+inline void body_sample(uint32_t V, int bi, uint32_t t, double x, double y, double z, const double q[4]) {
+    if (bi < 1 || bi > 63) return;
+    BodyTrack& b = g_bodies[std::make_pair(V, bi)];
+    if (b.n > 0 && t <= body_latest(b).t) return;
+    {
+        bool still = false;
+        if (b.n > 0) {
+            const BSample& pv = body_latest(b);
+            double dx = x - pv.x, dy = y - pv.y, dz = z - pv.z;
+            still = dx * dx + dy * dy + dz * dz < 0.01 * 0.01 && qangle_deg(pv.q, q) < 0.05;
+        }
+        body_view_sample(V, bi, q, still);
+    }
+    BSample& s = b.s[b.head];
+    s.t = t; s.x = x; s.y = y; s.z = z;
+    for (int i = 0; i < 4; i++) s.q[i] = q[i];
+    if (b.n > 0) {                                                           // same hemisphere as the previous
+        const BSample& p = body_latest(b);
+        if (p.q[0] * s.q[0] + p.q[1] * s.q[1] + p.q[2] * s.q[2] + p.q[3] * s.q[3] < 0) for (int i = 0; i < 4; i++) s.q[i] = -s.q[i];
+    }
+    qnorm(s.q);
+    b.head = (b.head + 1) % kBodyRing; if (b.n < kBodyRing) b.n++;
+    g_bodySamples++;
+}
+// The addon generation changed (new tick mapping): old samples sit on the wrong ticks. Offsets stay.
+inline void bodies_reset_samples() { for (auto& kv : g_bodies) { kv.second.n = 0; kv.second.head = 0; } }
+inline void bodies_forget(uint32_t V) {
+    for (auto it = g_bodyView.lower_bound(std::make_tuple(V, 0, (uint64_t)0)); it != g_bodyView.end() && std::get<0>(it->first) == V;) it = g_bodyView.erase(it);
+    for (auto it = g_bodyShown.lower_bound(std::make_tuple(V, 0, (uint64_t)0)); it != g_bodyShown.end() && std::get<0>(it->first) == V;) it = g_bodyShown.erase(it);
+    for (auto it = g_bodies.lower_bound(std::make_pair(V, 0)); it != g_bodies.end() && it->first.first == V;) it = g_bodies.erase(it);
+}
+
+// The body pose at world tick T from the two samples around it (at most 6 ticks apart). False if not covered.
+inline bool body_at(const BodyTrack& b, uint32_t T, BSample& o) {
+    for (int k = 0; k < b.n; k++) {
+        const BSample& a = b.s[(b.head + kBodyRing - 1 - k) % kBodyRing];
+        if (a.t == T) { o = a; return true; }
+        if (k + 1 >= b.n) break;
+        const BSample& p = b.s[(b.head + kBodyRing - 2 - k) % kBodyRing];
+        // a long gap is fine when the body did not move in it (the addon sends an unchanged body only every 60 ticks)
+        bool still = std::fabs(a.x - p.x) < 0.01 && std::fabs(a.y - p.y) < 0.01 && std::fabs(a.z - p.z) < 0.01
+                     && std::fabs(a.q[0] * p.q[0] + a.q[1] * p.q[1] + a.q[2] * p.q[2] + a.q[3] * p.q[3]) > 0.9999999;
+        if (p.t < T && T < a.t && (a.t - p.t <= 6 || still)) {
+            double f = (double)(T - p.t) / (double)(a.t - p.t);
+            o.t = T; o.x = p.x + (a.x - p.x) * f; o.y = p.y + (a.y - p.y) * f; o.z = p.z + (a.z - p.z) * f;
+            for (int i = 0; i < 4; i++) o.q[i] = p.q[i] + (a.q[i] - p.q[i]) * f;
+            qnorm(o.q);
+            return true;
+        }
+    }
+    return false;
+}
+// The body pose predicted at `target` (constant rate from the newest two samples, at most kBodyHorizon ahead).
+inline void body_predict(const BodyTrack& b, uint32_t target, BSample& o) {
+    const BSample& a = body_latest(b);
+    o = a;
+    if (b.n < 2) return;
+    const BSample& p = b.s[(b.head + kBodyRing - 2) % kBodyRing];
+    if (a.t <= p.t || a.t - p.t > 12) return;
+    long ahead = (long)target - (long)a.t;
+    if (ahead > kBodyHorizon) ahead = kBodyHorizon;
+    if (ahead <= 0) return;
+    double f = (double)ahead / (double)(a.t - p.t);
+    o.t = a.t + (uint32_t)ahead;
+    o.x = a.x + (a.x - p.x) * f; o.y = a.y + (a.y - p.y) * f; o.z = a.z + (a.z - p.z) * f;
+    for (int i = 0; i < 4; i++) o.q[i] = a.q[i] + (a.q[i] - p.q[i]) * f;
+    qnorm(o.q);
+}
+inline int body_data_len(int t) { return t == 0 ? 0 : t == 1 ? 40 : t == 2 ? 28 : -1; }
+
+// One measurement: the body's native CoM / rotation at a tick against the addon voxel pose at that tick.
+// First checks the current offset (prediction error, IPC status), then updates it.
+inline void body_measure(BodyTrack& b, const BSample& a, const double com[3], const double qw[4]) {
+    double vox[3] = { a.x, a.y, a.z };
+    if (b.offKnown) {
+        double w[3]; qrot(a.q, b.off, w);
+        double ex = vox[0] + w[0] - com[0], ey = vox[1] + w[1] - com[1], ez = vox[2] + w[2] - com[2];
+        b.errPos = std::sqrt(ex * ex + ey * ey + ez * ez);
+        b.errAng = qangle_deg(a.q, qw);
+        g_bodyErrPosSum += b.errPos; g_bodyErrAngSum += b.errAng; g_bodyErrN++;
+        if (b.errPos > g_bodyErrPosMax) g_bodyErrPosMax = b.errPos;
+        if (b.errAng > g_bodyErrAngMax) g_bodyErrAngMax = b.errAng;
+    }
+    double diff[3] = { com[0] - vox[0], com[1] - vox[1], com[2] - vox[2] }, off[3];
+    qrotT(a.q, diff, off);
+    bool restart = !b.offKnown;
+    if (b.offKnown) {
+        if (b.errPos > kBodyRejectPos || b.errAng > kBodyRejectAng) {
+            b.okRun = 0; b.rejected++; g_bodyRejected++;
+            if (++b.missRun < kBodyResetAfter) return;                     // discard this one
+            b.resets++; g_bodyResets++; restart = true;                    // the offset really changed
+        } else { b.okRun++; b.missRun = 0; }
+    }
+    if (restart) { b.okRun = 0; b.missRun = 0; }
+    for (int i = 0; i < 3; i++) b.off[i] = restart ? off[i] : b.off[i] + (off[i] - b.off[i]) * kBodyOffAlpha;
+    b.offKnown = true; b.measured++; g_bodyMeasured++;
+}
+// A native record usually reaches us before the addon sample of the same tick: keep it and retry after
+// later addon batches (like addon.h's g_pending for body0).
+struct BodyPending { uint32_t V; int bi; uint32_t T; double com[3], qw[4]; };
+inline std::vector<BodyPending> g_bodyPending;
+constexpr int kBodyPendingMax = 256; constexpr uint32_t kBodyPendingTicks = 90;
+inline uint64_t g_bodyPendingDropped = 0;
+inline void bodies_retry(uint32_t nowTick) {
+    for (size_t i = 0; i < g_bodyPending.size();) {
+        BodyPending& p = g_bodyPending[i];
+        auto it = g_bodies.find(std::make_pair(p.V, p.bi));
+        BSample a;
+        bool done = true;
+        if (it != g_bodies.end()) {
+            if (body_at(it->second, p.T, a)) body_measure(it->second, a, p.com, p.qw);
+            else if ((it->second.n == 0 || body_latest(it->second).t < p.T) && nowTick <= p.T + kBodyPendingTicks) done = false;
+            else g_bodyPendingDropped++;
+        }
+        if (done) g_bodyPending.erase(g_bodyPending.begin() + i); else i++;
+    }
+}
+
+// A native 0x81 of V (r, L bytes, body0 type 1) at world tick `tick`: measure each reported body's
+// voxel→CoM offset, and first check the current offset against it (the prediction error, IPC status).
+inline void body_native(const uint8_t* r, int L, uint32_t V, uint32_t tick) {
+    // The addon's bp samples are relative to body0 (position in body0 axes, rotation R0ᵀR) and type 1 is
+    // body0 here, so the native rel p / rel q compare directly: no hull pose involved.
+    if (L < 14 + 41 || r[14] != 1 || !has_bodies(V)) return;
+    int cnt = (int)(r[12] | (r[13] << 8)), p = 14;
+    for (int bi = 0; bi < cnt && p < L; bi++) {
+        int t = r[p], dl = body_data_len(t);
+        if (dl < 0 || p + 1 + dl > L) return;
+        if (bi >= 1 && t == 2) {
+            auto it = g_bodies.find(std::make_pair(V, bi));
+            BSample a;
+            if (it != g_bodies.end() && it->second.lastNative != tick) {
+                BodyTrack& b = it->second;
+                b.lastNative = tick;
+                double rq[4] = { F(r + p + 1), F(r + p + 5), F(r + p + 9), F(r + p + 13) };
+                double rp[3] = { F(r + p + 17), F(r + p + 21), F(r + p + 25) };
+                qnorm(rq);
+                const double* com = rp; const double* qw = rq;
+                if (body_at(b, tick, a)) body_measure(b, a, com, qw);
+                else if (b.n == 0 || body_latest(b).t < tick) {                   // addon sample not here yet
+                    if ((int)g_bodyPending.size() >= kBodyPendingMax) { g_bodyPending.erase(g_bodyPending.begin()); g_bodyPendingDropped++; }
+                    BodyPending pd{ V, bi, tick, { com[0], com[1], com[2] }, { qw[0], qw[1], qw[2], qw[3] } };
+                    g_bodyPending.push_back(pd);
+                }
+            }
+        }
+        p += 1 + dl;
+    }
+}
+
+inline bool body_usable(uint32_t V, int bi, uint32_t tick, const BodyTrack*& out) {
+    auto it = g_bodies.find(std::make_pair(V, bi));
+    if (it == g_bodies.end() || !it->second.offKnown || it->second.n == 0) return false;
+    if (it->second.okRun < 1 || it->second.missRun > 0) return false;      // guard: not confirmed / last check missed
+    if (tick > body_latest(it->second).t + (uint32_t)g_cfg.stale) return false;
+    out = &it->second;
+    return true;
+}
+
+// Rewrite the type-2 slots of record r (L bytes, body0 already filled with the pose at `target`) with
+// the addon's body poses predicted at `target`. Returns the number of bodies written.
+inline int body_fill(uint8_t* r, int L, uint32_t V, uint32_t target, uint32_t tick) {
+    if (!g_cfg.bodySync || L < 14 + 41 || r[14] != 1 || !has_bodies(V)) return 0;
+    int cnt = (int)(r[12] | (r[13] << 8)), p = 14, n = 0;
+    for (int bi = 0; bi < cnt && p < L; bi++) {
+        int t = r[p], dl = body_data_len(t);
+        if (dl < 0 || p + 1 + dl > L) break;
+        const BodyTrack* b = nullptr;
+        if (bi >= 1 && t == 2 && body_usable(V, bi, tick, b)) {
+            BSample o; body_predict(*b, target, o);
+            // relative sample (body0 axes): rel p = voxel + R(q)·off, rel q = q
+            double w[3], rp[3], rq[4] = { o.q[0], o.q[1], o.q[2], o.q[3] };
+            qrot(o.q, b->off, w);
+            rp[0] = o.x + w[0]; rp[1] = o.y + w[1]; rp[2] = o.z + w[2];
+            qnorm(rq);
+            double old[4] = { F(r + p + 1), F(r + p + 5), F(r + p + 9), F(r + p + 13) };   // keep the record's hemisphere
+            if (old[0] * rq[0] + old[1] * rq[1] + old[2] * rq[2] + old[3] * rq[3] < 0) for (int i = 0; i < 4; i++) rq[i] = -rq[i];
+            for (int i = 0; i < 4; i++) WF(r + p + 1 + i * 4, (float)rq[i]);
+            for (int i = 0; i < 3; i++) WF(r + p + 17 + i * 4, (float)rp[i]);
+            n++;
+        }
+        p += 1 + dl;
+    }
+    g_bodyWrites += n;
+    return n;
+}
+
+// Copy template `src` (len bytes) to `dst`, turning type-0 slots of usable bodies into type 2 so
+// body_fill has room for them (an appended record is ours: its layout may differ from the server's;
+// bodyCount never changes). Returns the new length, or 0 if it does not fit in `cap`.
+inline int body_build(uint8_t* dst, int cap, const uint8_t* src, int len, uint32_t V, uint32_t tick) {
+    if (!g_cfg.bodySync || len < 14 + 41 || src[14] != 1 || !has_bodies(V)) {
+        if (len > cap) return 0;
+        memcpy(dst, src, len); return len;
+    }
+    int cnt = (int)(src[12] | (src[13] << 8)), p = 14, w = 14, grown = 0;
+    if (cap < 14) return 0;
+    memcpy(dst, src, 14);
+    for (int bi = 0; bi < cnt; bi++) {
+        if (p >= len) return 0;
+        int t = src[p], dl = body_data_len(t);
+        if (dl < 0 || p + 1 + dl > len) return 0;
+        const BodyTrack* b = nullptr;
+        if (bi >= 1 && t == 0 && body_usable(V, bi, tick, b)) {
+            if (w + 29 > cap || w + 29 > kMaxRecLen) return 0;
+            dst[w] = 2;
+            memset(dst + w + 1, 0, 28);
+            WF(dst + w + 13, 1.0f);                                          // identity until body_fill writes it
+            w += 29; grown++;
+        } else {
+            if (w + 1 + dl > cap || w + 1 + dl > kMaxRecLen) return 0;
+            memcpy(dst + w, src + p, 1 + dl);
+            w += 1 + dl;
+        }
+        p += 1 + dl;
+    }
+    if (p != len) return 0;                                                  // not a plain 0x81: leave it
+    if (grown) g_bodyBuilt++;
+    return w;
+}
+
+// Near recipients (2026-11-21): a client whose native gap is <= lag gets the server's records untouched,
+// and when a gun is nudged by a few hundredths of a degree the server sends that body as type 0 ("no
+// change") for minutes: the client's laser and shells stay on the old aim. For each native 0x81 that
+// reaches this client (as is or rewritten by pass 1; 2026-11-21: the shooter is often a "far" recipient), a type-0 body the addon reports whose true rotation differs from what this
+// client was last shown by more than kNearBodyDeg becomes type 2 with the addon pose (the hull and the
+// server's type-2 bodies are not touched). Grows `wpos` by 28 per body; returns the bodies written.
+inline int bodynear_pass(uint64_t peer, uint8_t* out, int& wpos, int outcap, int nativeCount, int recCount, uint32_t tick,
+                         const std::unordered_set<uint32_t>& handled) {
+    if (!body_sync_for(peer)) return 0;
+    uint8_t* body = out + 8; int n = 0;
+    for (int i = 0, off = 20; i < recCount && off < wpos - 8; i++) {           // all records: appended ones are shown too
+        int blen = wpos - 8;
+        int L = rec::decode_len(body, blen, off);
+        if (L <= 0 || off + L > blen) break;
+        if (rec::U32(body, blen, off) == 0x81 && L >= 14 + 41 && body[off + 14] == 1) {
+            uint32_t V = rec::U32(body, blen, off + 4);
+            if (has_bodies(V)) {
+                // every native record (as is, or pass 1's rewrite: its type-0 slots are left by body_fill); appended
+                // records were built by body_build, which already turns usable type-0 slots into type 2
+                bool untouched = i < nativeCount; (void)handled;
+                int cnt = (int)rec::U16(body, blen, off + 12), p = off + 14;
+                for (int bi = 0; bi < cnt && p < off + L; bi++) {
+                    int t = body[p], dl = body_data_len(t);
+                    if (dl < 0 || p + 1 + dl > off + L) break;
+                    if (bi >= 1 && g_bodies.count(std::make_pair(V, bi))) {
+                        BodyShown& sh = g_bodyShown[std::make_tuple(V, bi, peer)];
+                        const BodyTrack* b = nullptr;
+                        if (t == 2) {                                                 // what this client is shown now
+                            double q[4] = { F(body + p + 1), F(body + p + 5), F(body + p + 9), F(body + p + 13) };
+                            qnorm(q); for (int k = 0; k < 4; k++) sh.rq[k] = q[k]; sh.have = true;
+                        } else if (t == 0 && untouched && body_usable(V, bi, tick, b)) {
+                            BSample o; body_predict(*b, tick, o);
+                            double rq[4] = { o.q[0], o.q[1], o.q[2], o.q[3] }; qnorm(rq);
+                            if ((!sh.have || qangle_deg(sh.rq, rq) > kNearBodyDeg) && wpos + 28 <= outcap) {
+                                double w[3]; qrot(o.q, b->off, w);
+                                double rp[3] = { o.x + w[0], o.y + w[1], o.z + w[2] };
+                                if (sh.have && sh.rq[0] * rq[0] + sh.rq[1] * rq[1] + sh.rq[2] * rq[2] + sh.rq[3] * rq[3] < 0)
+                                    for (int k = 0; k < 4; k++) rq[k] = -rq[k];
+                                memmove(body + p + 29, body + p + 1, (size_t)(wpos - 8 - (p + 1)));
+                                body[p] = 2;
+                                for (int k = 0; k < 4; k++) WF(body + p + 1 + k * 4, (float)rq[k]);
+                                for (int k = 0; k < 3; k++) WF(body + p + 17 + k * 4, (float)rp[k]);
+                                wpos += 28; L += 28; dl = 28; n++;
+                                for (int k = 0; k < 4; k++) sh.rq[k] = rq[k]; sh.have = true;
+                            }
+                        }
+                    }
+                    p += 1 + dl;
+                }
+            }
+        }
+        off += L;
+    }
+    g_bodyNear += n;
+    return n;
+}
+
 // Per-recipient bandwidth budget (safety valve). Returns true and charges `addLen` if within cap.
 inline bool budget_ok(uint64_t peer, uint32_t tick, int addLen) {
     uint32_t win = tick / (uint32_t)g_cfg.budgetWindow;
@@ -642,6 +1065,7 @@ inline bool budget_ok(uint64_t peer, uint32_t tick, int addLen) {
 // cub if ANYTHING changed, else 0.
 inline int alias_pass(uint64_t peer, uint8_t* out, int& wpos, int outcap, int recCount, uint32_t tick, int& added, int& addedBytes);
 inline int orbit_pass(uint8_t* out, int& wpos, int outcap, int recCount, uint32_t tick, int& added, int& addedBytes);
+inline int bodyoff_pass(uint8_t* out, int wpos, int recCount);
 inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* out, int outcap, uint32_t tick, bool relayOn = true) {
     // Rewound-world-tick guard: never modify a message whose world tick is not newer than the last
     // one we injected into for this recipient. A server rewind / resend of an older tick must pass
@@ -650,6 +1074,7 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
     // the battle logs — envelope ticks are strictly forward — but the guard is cheap insurance.
     auto pit = g_peerProc.find(peer);
     if (pit != g_peerProc.end() && tick <= pit->second) return 0;   // 0 = leave original send as-is
+    const bool bodyOn = body_sync_for(peer);                         // this player turned the gun rewrite on (?bs on)
     g_peerProc[peer] = tick;
 
     memcpy(out, orig, cub);
@@ -687,6 +1112,7 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
                     target = tl > (long)v.curT ? (uint32_t)tl : v.curT;
                 }
                 fill_pose(body + off, blen - off, v, target);
+                if (bodyOn) body_fill(body + off, L, V, target, tick);               // turret / gun (prototype)
                 handled.insert(V); rewrote++;
                 g_sent[key] = Sent{ v.curT, eta, tick };
             }
@@ -723,20 +1149,24 @@ inline int build_inject(uint64_t peer, const uint8_t* orig, int cub, uint8_t* ou
         if (wpos + v.len > outcap) continue;
         if (!budget_ok(peer, tick, v.len)) continue;                    // per-recipient cap: skip (coarsen)
         uint32_t eta, target; promise_of(v, peer, V, tick, eta, target);
-        memcpy(out + wpos, v.bytes, v.len);
+        int len = bodyOn ? body_build(out + wpos, outcap - wpos, v.bytes, v.len, V, tick) : 0;   // turret / gun slots (prototype)
+        if (len <= 0) { memcpy(out + wpos, v.bytes, v.len); len = v.len; }
         memcpy(out + wpos + 8, &eta, 4);
-        fill_pose(out + wpos, v.len, v, target);
-        wpos += v.len; addedBytes += v.len; added++;
+        fill_pose(out + wpos, len, v, target);
+        if (bodyOn) body_fill(out + wpos, len, V, target, tick);
+        wpos += len; addedBytes += len; added++;
         g_sent[std::make_pair(peer, V)] = Sent{ v.curT, eta, tick };
     }
 
+    int nearWpos = wpos;
+    int nearN = relayOn ? bodynear_pass(peer, out, wpos, outcap, count, count + added, tick, handled) : 0;   // near clients: nudged guns
+    addedBytes += wpos - nearWpos;                                                              // grown records, same count
     int aliased = (g_alias.empty() && g_releaseSnap.empty() && g_standby.empty()) ? 0 : alias_pass(peer, out, wpos, outcap, count + added, tick, added, addedBytes);
     if (g_orbit.on) aliased += orbit_pass(out, wpos, outcap, count + added, tick, added, addedBytes);
-    if (rewrote == 0 && added == 0 && aliased == 0) return 0;
-    if (added > 0) {
-        uint32_t total; memcpy(&total, out + 4, 4); total += addedBytes; memcpy(out + 4, &total, 4);
-        uint32_t rc;    memcpy(&rc, out + 24, 4);   rc += added;          memcpy(out + 24, &rc, 4);
-    }
+    if (g_bodyOff.on) aliased += bodyoff_pass(out, wpos, count + added);
+    if (rewrote == 0 && added == 0 && aliased == 0 && nearN == 0) return 0;
+    if (addedBytes > 0) { uint32_t total; memcpy(&total, out + 4, 4); total += addedBytes; memcpy(out + 4, &total, 4); }
+    if (added > 0) { uint32_t rc; memcpy(&rc, out + 24, 4); rc += added; memcpy(out + 24, &rc, 4); }
     g_injRecords += added; g_injBytes += addedBytes; g_rewrites += rewrote; g_injSends++;
     return cub + addedBytes;
 }
@@ -893,6 +1323,71 @@ inline int orbit_pass(uint8_t* out, int& wpos, int outcap, int recCount, uint32_
     wpos += v.len; addedBytes += v.len; added++;
     g_orbitRecords++;
     return 1;
+}
+
+// debug.bodyoff: shift one body of one vehicle in every 0x81 of this message. Lengths never change.
+inline int bodyoff_pass(uint8_t* out, int wpos, int recCount) {
+    uint8_t* body = out + 8; int blen = wpos - 8, n = 0;
+    for (int i = 0, off = 20; i < recCount && off < blen; i++) {
+        int L = rec::decode_len(body, blen, off);
+        if (L <= 0) break;
+        if (rec::U32(body, blen, off) == 0x81 && rec::U32(body, blen, off + 4) == g_bodyOff.veh && off + 14 <= blen) {
+            int cnt = (int)rec::U16(body, blen, off + 12), p = off + 14, end = off + L;
+            for (int bi = 0; bi < cnt && p < end; bi++) {
+                int t = body[p];
+                int dl = t == 0 ? 0 : t == 1 ? 40 : t == 2 ? 28 : -1;
+                if (dl < 0 || p + 1 + dl > end) break;
+                if (bi == g_bodyOff.body) {
+                    if (t == 1 || t == 2) {                              // rotation: q' = r * q (x, y, z, w)
+                        const BodyOff& o = g_bodyOff;
+                        double x = F(body + p + 1), y = F(body + p + 5), z = F(body + p + 9), w = F(body + p + 13);
+                        double nx = o.rw * x + o.rx * w + o.ry * z - o.rz * y;
+                        double ny = o.rw * y - o.rx * z + o.ry * w + o.rz * x;
+                        double nz = o.rw * z + o.rx * y - o.ry * x + o.rz * w;
+                        double nw = o.rw * w - o.rx * x - o.ry * y - o.rz * z;
+                        WF(body + p + 1, (float)nx); WF(body + p + 5, (float)ny); WF(body + p + 9, (float)nz); WF(body + p + 13, (float)nw);
+                    }
+                    if (t == 2) {
+                        WF(body + p + 17, F(body + p + 17) + (float)g_bodyOff.dx);
+                        WF(body + p + 21, F(body + p + 21) + (float)g_bodyOff.dy);
+                        WF(body + p + 25, F(body + p + 25) + (float)g_bodyOff.dz);
+                        n++;
+                    } else if (t == 1) {
+                        W(body + p + 17, D(body + p + 17) + g_bodyOff.dx);
+                        W(body + p + 25, D(body + p + 25) + g_bodyOff.dy);
+                        W(body + p + 33, D(body + p + 33) + g_bodyOff.dz);
+                        n++;
+                    }
+                    break;
+                }
+                p += 1 + dl;
+            }
+        }
+        off += L;
+    }
+    g_bodyOffRecords += n;
+    return n;
+}
+
+// Experiment (2026-11-21): does a client draw a gun nudged by a few hundredths of a degree? While debug.bodyoff
+// is on, every press of seat hotkey 6 (client 0x64 keyMask bit 20, protocol/client.md) by any player adds
+// stepDeg to the offset (about the body0 y axis) and makes the next record to every client carry that body
+// as type 2 (bodynear_pass sees "not shown" and writes the true pose; bodyoff_pass then rotates it).
+// Returns true when a press was taken.
+constexpr uint32_t kHotkey6 = 1u << 20;
+inline std::map<uint64_t, uint32_t> g_keyMask;
+inline uint64_t g_keySteps = 0;
+inline bool key_step(uint64_t peer, uint32_t mask) {
+    uint32_t prev = g_keyMask[peer]; g_keyMask[peer] = mask;
+    if (!(mask & kHotkey6) || (prev & kHotkey6) || !g_bodyOff.on || g_bodyOff.body < 1) return false;
+    BodyOff& o = g_bodyOff;
+    o.yawDeg += o.stepDeg;
+    double h = o.yawDeg * 3.14159265358979323846 / 180.0 / 2.0;
+    o.rx = 0; o.ry = std::sin(h); o.rz = 0; o.rw = std::cos(h);
+    for (auto it = g_bodyShown.lower_bound(std::make_tuple(o.veh, o.body, (uint64_t)0));
+         it != g_bodyShown.end() && std::get<0>(it->first) == o.veh && std::get<1>(it->first) == o.body; ++it) it->second.have = false;
+    g_keySteps++;
+    return true;
 }
 
 } // namespace relay

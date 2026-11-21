@@ -113,6 +113,7 @@ inline void reset_offset() {
     g_kMatchKnown = false; g_kMatch = 0; g_nVotes = 0; g_voteHead = 0;
     g_kArrKnown = false; g_kArr = 0; g_nArr = 0; g_arrHead = 0;
     choose_offset();
+    relay::bodies_reset_samples();
     g_hist.clear();
     g_pending.clear();
     g_resets++;
@@ -240,6 +241,23 @@ inline int on_batch(const char* line, uint32_t nowTick, int& fedOut) {
         fedOut++; g_fed++;
     });
     if (!g_pending.empty()) retry_pending();
+    // turret / gun prototype: "bp":[[id, body, x, y, z, qx, qy, qz, qw], ...] = one voxel of each non-root body
+    // (its world position and the body's rotation), same tc as data. Used only once the tick offset is known.
+    {
+        const char* bp = json::find_value(line, "bp");
+        if (bp && *bp == '[' && g_kKnown) {
+            int64_t t = (int64_t)tc + g_k;
+            if (t > 0 && t <= (int64_t)nowTick + 60) json::for_each_elem(bp, [&](const char* e) {
+                double v[9];
+                if (*e != '[' || json::arr_nums(e, v, 9) != 9) { g_bad++; return; }
+                for (double c : v) if (!std::isfinite(c)) { g_bad++; return; }
+                if (v[0] < 0 || v[0] > 4294967295.0 || v[1] < 1 || v[1] > 63) { g_bad++; return; }
+                double q[4] = { v[5], v[6], v[7], v[8] };
+                relay::body_sample((uint32_t)v[0], (int)v[1], (uint32_t)t, v[2], v[3], v[4], q);
+            });
+        }
+        if (!relay::g_bodyPending.empty()) relay::bodies_retry(nowTick);
+    }
     // fake_missile standby (relay.h g_standby): "fk":[F,...] = all fakes; absent = none. Before "al":
     // set_alias sends a released fake back to standby only if it is listed here.
     {
