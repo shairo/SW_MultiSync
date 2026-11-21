@@ -93,7 +93,7 @@ SW_MultiSync が居なければ何も載せません（`WEBMAP_SWHOOK_LAG=0` で
 ### どの voxel を読むか（Bridge）
 
 車両が出たとき、Bridge の `vehicle-service.js` が車両 XML を `body-voxels.js` の `extractBodyVoxels` にかけ、
-アドオンへ `{mode:"set_body_voxels", data:{vehicle_id, v:[[body の番号, x, y, z], ...]}}` を返します（同じ内容は送り直しません）。
+アドオンへ `{mode:"set_body_voxels", data:{vehicle_id, v:[[body の番号, x, y, z], ...]}}` を返します（同じ内容は送り直しません。ただし、ゲームのフォルダーを `working` と `working_server` の間で切り替えたときは、覚えた内容と送る前の `set_body_voxels` を捨て、切り替え先の車両の分を送り直します。砲の無い車両にも、空の一覧を一度送ります）。
 
 - 砲・レーザーのある body から、関節（ピボット・ロボットヒンジなど 20 種）をたどって body0 まで戻る道を探し、砲の側から最大 3 個の body を選びます（全体で最大 15）。
 - 関節の子は親の y 軸の向きに 1〜6 voxel 先にあります。ミラー（`<c t>` の 2 = y）なら反対側です。

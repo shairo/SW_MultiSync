@@ -1,5 +1,28 @@
 # 変更履歴
 
+## 未リリース（`feat/vpos-highrate`、sk7z-xyz のフォーク）
+
+WebMap（アドオン・WebMapBridge・StormWorksMapViewer）と組み合わせて使う機能です。WebMap が無ければ今まで通り動きます。連携の全体は [webmap-連携.md](webmap-連携.md) にあります。
+
+### 同期改善（relay）
+- **WebMap アドオンの位置・姿勢を使うようにしました**: WebMapBridge から IPC `addon.poses` で、全車両の位置・姿勢が 3 tick ごとに届きます。近くにプレイヤーがいない車両も含むので、ゲームサーバー自身の記録が粗い車両でも中継できます。アドオンの tick と世界の tick の対応は、自動で見つけます（設定 `addonPoses`、既定で有効）。
+- アドオンを読み込み直したとき（世代 `ep` が変わったとき）は、tick の対応をやり直します。同じ世代で遅れて届いた古い束は捨てます。
+- **fake_missile（煙だけの車両）を、追従先のミサイルや船の位置に見せるようにしました**: アドオンが送る `al`（追従）・`fk`（待機）・`pk`（船の下で待機）に従います。アドオンの送信が `stale` tick 途絶えたら、これらの指示を外します。
+
+### 実験機能
+- **砲塔・砲の向きを、アドオンが読んだ本当の向きに合わせます（試作）**: MapViewer で Type が Tank の車両だけが対象です。全体の許可は設定 `bodySync`（既定 0）で、そのうえでプレイヤーごとにゲームのチャットで切り替えます（既定 OFF、保存しません）。
+  - `?bs` 今の状態を自分にだけ表示 / `?bs on` 自分に届く記録だけ書き換える / `?bs off` やめる
+  - `?multisync` の表示にも `bs(you)` を足しました。
+  - Tank の車両が多いと、アドオンの `getVehiclePos` の呼び出しが増えて TPS が下がります（止まった戦車 10 両で約 65 → 約 57）。
+
+### 表示
+- GUI・`swctl status` に、プレイヤーごとの Steam P2P の経路（直接 / 中継）と、車両ごとの届け方（`pass` / `relay` / `addon` / `fake`）を出すようにしました。
+
+### 開発者向け
+- IPC に `addon.poses` を追加し、`status` に `addon{…}`（tick の対応・束の数・fake の指示・砲塔の同期の状態）を足しました（[ipc-protocol.md](ipc-protocol.md)）。
+- サーバーのタグ 0x68 / 0x69 / 0x6A / 0x84（野生の魚など、物の種類）を読めるようにしました。
+- フォークで足した実験用の IPC `debug.clone`・`debug.orbit`・`debug.bodyoff` と、座席のホットキー 6 で砲を回す処理を消しました（フォーク元の `debug.hold`・`debug.nudge`・`mutate.set`・`?unstuck` は残っています）。
+
 ## v0.2.4
 
 ### 修正
